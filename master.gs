@@ -35,7 +35,7 @@ function runMasterShiftChecker() {
   const runSafe = (phaseFunc, phaseName) => {
     try {
       phaseFunc();
-      Utilities.sleep(2000); // サーバーエラー(Service Spreadsheets failed)防止用
+      Utilities.sleep(2000); // サーバーエラー防止用
     } catch (e) {
       Logger.log(`❌ ${phaseName} 実行中にエラーが発生しスキップしました: ` + e.message);
     }

@@ -2,6 +2,7 @@
  * ==========================================
  * アラートリストの転記（アーカイブ）処理
  * ※ A列にチェックを入れるとアーカイブシートへ自動移動します
+ * （★リンク等のリッチテキストや背景色も保持して移動します）
  * ==========================================
  */
 function processAlertArchiveTrigger(e) {
@@ -26,15 +27,21 @@ function processAlertArchiveTrigger(e) {
       archiveSheet.setFrozenRows(1);
     }
     
-    // 該当行をコピーして削除
-    const rowData = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
-    archiveSheet.appendRow(rowData);
+    const lastCol = sheet.getLastColumn();
+    const sourceRange = sheet.getRange(row, 1, 1, lastCol);
+    
+    // アーカイブシートの最終行の次を取得
+    const targetRow = archiveSheet.getLastRow() + 1;
+    const targetRange = archiveSheet.getRange(targetRow, 1, 1, lastCol);
+    
+    // ★値だけでなく、リッチテキスト（URLリンク）や背景色もすべてそのままコピーする
+    sourceRange.copyTo(targetRange, SpreadsheetApp.CopyPasteType.PASTE_NORMAL, false);
+    
+    // アラートリストから元の行を削除
     sheet.deleteRow(row);
   }
 }
 
-// ※ すでに他のonEdit関数が存在しない場合は、以下の名前をonEditに変更するか、
-// 既存のonEdit関数の中に processAlertArchiveTrigger(e); を追記してください。
 function onEdit(e) {
   processAlertArchiveTrigger(e);
 }
