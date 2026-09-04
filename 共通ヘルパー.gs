@@ -1,7 +1,7 @@
 /**
  * ==========================================
  * シフトチェッカー 共通ヘルパー関数群 
- * (過去1ヶ月 ＆ Jinjer有給データ連携対応版)
+ * (変則営業・休館日 2シート統合対応 ＆ 掲載ステータス ＆ 2診clinicID判定 連携 ＆ 橋本医師除外 ＆ 応募日対応版)
  * ==========================================
  */
 
@@ -14,20 +14,20 @@ function getCheckerLocationMaster(locSs) {
   
   if (locSheet) {
     const lData = locSheet.getDataRange().getDisplayValues();
-    const lHeaders = lData[0].map(h => String(h).replace(/\s+/g, ''));
+    const lHeaders = lData[0].map(h => String(h).replace(/[\s ]+/g, ''));
     const idxFormal = lHeaders.indexOf("正規記載");
     const idxStatus = lHeaders.indexOf("システム反映");
     const aliasIndices = lHeaders.map((h, i) => (h.includes("表記揺れ") || h.includes("クリニックNo")) ? i : -1).filter(i => i !== -1);
     
     if (idxFormal > -1) {
       for (let i = 1; i < lData.length; i++) {
-        const formalName = String(lData[i][idxFormal]).replace(/\s+/g, '');
+        const formalName = String(lData[i][idxFormal]).replace(/[\s ]+/g, '');
         if (!formalName) continue;
         if (idxStatus > -1) locSystemStatus.set(formalName, String(lData[i][idxStatus]).trim() === "済");
         
         locMap.set(formalName, formalName);
         aliasIndices.forEach(idx => {
-          const alias = String(lData[i][idx]).replace(/\s+/g, '');
+          const alias = String(lData[i][idx]).replace(/[\s ]+/g, '');
           if (alias) locMap.set(alias, formalName);
         });
       }
@@ -43,20 +43,79 @@ function getCheckerLocationMaster(locSs) {
   };
 }
 
+// ★休館日と変則営業の「両方のシート」を読み込んでマスタ化する統合エンジン
 function getCheckerClosedDays(activeSs, scanStartDate, normalizeFunc) {
-  const closedDataMap = new Set();
+  const closedDataMap = new Map();
+
+  const parseTimeRanges = (timeStr) => {
+    const ranges = [];
+    const parts = timeStr.split(/[,、\s]+/);
+    parts.forEach(p => {
+      const t = p.split(/[-〜～]/);
+      if (t.length === 2) {
+        const startMin = parseTimeToMinutes(t[0]);
+        const endMin = parseTimeToMinutes(t[1]);
+        if (!isNaN(startMin) && !isNaN(endMin)) ranges.push({ startMin, endMin });
+      }
+    });
+    return ranges;
+  };
+
+  // 1. 休館日シートの読み込み
   const closedSheet = activeSs.getSheetByName("休館日");
   if (closedSheet) {
     const cData = closedSheet.getDataRange().getValues();
+    const headers = cData[0].map(h => String(h).replace(/[\s ]+/g, ''));
+    const cDate = Math.max(0, headers.findIndex(h => h.includes('日付') || h.includes('対象日')));
+    const cTime = Math.max(1, headers.findIndex(h => h.includes('時間') || h.includes('営業')));
+    const cClinic = Math.max(2, headers.findIndex(h => h.includes('拠点名') || h.includes('拠点')));
+
     for (let i = 1; i < cData.length; i++) {
-      const dateObj = parseDateToSafeDateObj(cData[i][0]);
+      const dateObj = parseDateToSafeDateObj(cData[i][cDate]);
       if (!dateObj || dateObj < scanStartDate) continue; 
-      const rawClinicName = String(cData[i][2]).trim();
+      
+      const rawClinicName = String(cData[i][cClinic]).trim();
+      const timeStr = String(cData[i][cTime]).trim();
       if (rawClinicName) {
-        closedDataMap.add(`${toYYYYMMDD(dateObj)}_${normalizeFunc(rawClinicName)}`);
+        const clinicKey = rawClinicName.includes("全拠点") ? "全拠点" : normalizeFunc(rawClinicName);
+        const key = `${toYYYYMMDD(dateObj)}_${clinicKey}`;
+        
+        if (!timeStr || timeStr.includes("休館") || timeStr.includes("全休") || timeStr.includes("全日")) {
+          closedDataMap.set(key, { type: "closed" });
+        } else {
+          const ranges = parseTimeRanges(timeStr);
+          if (ranges.length > 0) closedDataMap.set(key, { type: "irregular", ranges });
+          else closedDataMap.set(key, { type: "closed" });
+        }
       }
     }
   }
+
+  // 2. 変則営業シートの読み込み
+  const irrSheet = activeSs.getSheetByName("変則営業");
+  if (irrSheet) {
+    const iData = irrSheet.getDataRange().getValues();
+    const headers = iData[0].map(h => String(h).replace(/[\s ]+/g, ''));
+    const iDate = Math.max(0, headers.findIndex(h => h.includes('日付') || h.includes('対象日')));
+    const iTime = Math.max(1, headers.findIndex(h => h.includes('時間') || h.includes('営業')));
+    const iClinic = Math.max(2, headers.findIndex(h => h.includes('拠点名') || h.includes('拠点')));
+
+    for (let i = 1; i < iData.length; i++) {
+      const dateObj = parseDateToSafeDateObj(iData[i][iDate]);
+      if (!dateObj || dateObj < scanStartDate) continue; 
+      
+      const rawClinicName = String(iData[i][iClinic]).trim();
+      const timeStr = String(iData[i][iTime]).trim();
+      if (rawClinicName && timeStr) {
+        const clinicKey = rawClinicName.includes("全拠点") ? "全拠点" : normalizeFunc(rawClinicName);
+        const ranges = parseTimeRanges(timeStr);
+        if (ranges.length > 0) {
+          closedDataMap.set(`${toYYYYMMDD(dateObj)}_${clinicKey}`, { type: "irregular", ranges });
+        }
+      }
+    }
+  }
+
   return closedDataMap;
 }
 
@@ -68,22 +127,33 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
     const data = sheet.getDataRange().getDisplayValues();
     if (data.length < 2) return;
     
+    // ★ 修正: '応募日' または '応募日時' を追加取得
     const cols = getColumnIndices(data[0], [
       '医籍番号', '名前', 'クリニックNo', 'クリニック名', '診療科', '勤務種別', '勤務日', 
-      '勤務開始時間', '勤務終了時間', '時給1', '時給2', '時給3', '時給4', '時給合計', '合計日給'
+      '勤務開始時間', '勤務終了時間', '時給1', '時給2', '時給3', '時給4', '時給合計', '合計日給', '掲載ステータス', '業務内容', '備考', '応募日'
     ]);
     
     const totalCol = cols['時給合計'] !== -1 ? cols['時給合計'] : cols['合計日給'];
+    const remarksCol = cols['業務内容'] !== -1 ? cols['業務内容'] : cols['備考'];
+    const applyCol = cols['応募日'];
 
     for (let i = 1; i < data.length; i++) {
       const row = data[i];
       const dateObj = parseDateToSafeDateObj(row[cols['勤務日']]);
-      // ★フィルターを過去1ヶ月（scanStartDate）に変更
       if (!dateObj || dateObj < scanStartDate) continue;
+
+      // ★ 橋本浩医師（310036）の「応募」はシステム上存在しないものとして完全に無視
+      if (sourceName === "応募") {
+        const idNo = cols['医籍番号'] !== -1 ? String(row[cols['医籍番号']]).trim() : "";
+        const docName = cols['名前'] !== -1 ? String(row[cols['名前']]).trim() : "";
+        if (idNo === "310036" || docName.includes("橋本浩")) {
+          continue; 
+        }
+      }
 
       const dateStr = toYYYYMMDD(dateObj);
       const rawClinic = cols['クリニック名'] !== -1 ? String(row[cols['クリニック名']]) : "";
-      let doctor = cols['名前'] !== -1 ? String(row[cols['名前']]).replace(/\s+/g, '') : "";
+      let doctor = cols['名前'] !== -1 ? String(row[cols['名前']]).replace(/[\s ]+/g, '') : "";
       
       if (sourceName === "募集" && !doctor) doctor = "募集";
       if (!rawClinic || !doctor) continue;
@@ -98,6 +168,12 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
       
       if (rawClinic.includes("有給") || rawClinic.includes("有休") || rawClinic.includes("欠勤") || type.includes("有給") || type.includes("欠勤")) {
         record.hasLeave = true;
+      }
+
+      // ★ 応募日の取得（タイムラグ除外判定用）
+      let applyDateObj = null;
+      if (sourceName === "応募" && applyCol !== -1 && row[applyCol]) {
+         applyDateObj = parseDateToSafeDateObj(row[applyCol]);
       }
       
       record.shifts.push({
@@ -116,7 +192,10 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
           Number(row[cols['時給1']]) || 0, Number(row[cols['時給2']]) || 0,
           Number(row[cols['時給3']]) || 0, Number(row[cols['時給4']]) || 0
         ],
-        wageTotal: totalCol !== -1 ? Number(row[totalCol]) || 0 : 0
+        wageTotal: totalCol !== -1 ? Number(row[totalCol]) || 0 : 0,
+        publishStatus: cols['掲載ステータス'] !== -1 ? String(row[cols['掲載ステータス']]).trim() : "",
+        remarks: remarksCol !== -1 ? String(row[remarksCol]) : "",
+        applyDateObj: applyDateObj // ★ 追加
       });
     }
   };
@@ -158,7 +237,6 @@ function formatMinutesToHHMM(mins) {
   return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
 }
 
-// ★「2027年02月22日」形式にも対応するよう拡張
 function parseDateToSafeDateObj(dateInput) {
   if (!dateInput) return null;
   if (dateInput instanceof Date) return new Date(dateInput.getFullYear(), dateInput.getMonth(), dateInput.getDate());
@@ -190,11 +268,55 @@ function safeExecute(action, maxRetry = 3, actionName = "スプレッドシー�
   }
 }
 
-/**
- * ==========================================
- * ★ Jinjer 有給データ取得エンジン
- * ==========================================
- */
+// ★修正: clinicIDと拠点名の「ダブルマッチング」で2診要望を逃さないエンジン
+function getCheckerTwoDoctorRequests(twoDocSsId, scanStartDate, normalizeFunc) {
+  const requestsMap = new Map();
+  const ss = safeExecute(() => SpreadsheetApp.openById(twoDocSsId), 3, "2診要望一覧シートの取得");
+  if (!ss) return requestsMap;
+  
+  const sheet = ss.getSheetByName("２診要望一覧") || ss.getSheetByName("2診要望一覧") || ss.getSheets()[0];
+  if (!sheet) return requestsMap;
+
+  const data = sheet.getDataRange().getDisplayValues();
+  if (data.length < 2) return requestsMap;
+  
+  const headers = data[0].map(h => String(h).replace(/[\s ]+/g, '').toLowerCase());
+  const colDate = headers.findIndex(h => h.includes('日付') || h.includes('対象日'));
+  const colClinicId = headers.findIndex(h => h.includes('clinicid'));
+  const colClinicName = headers.findIndex(h => h.includes('拠点') || h.includes('クリニック'));
+  const colStart = headers.findIndex(h => h.includes('開始'));
+  const colEnd = headers.findIndex(h => h.includes('終了'));
+  
+  if (colDate === -1) return requestsMap;
+  
+  for (let i = 1; i < data.length; i++) {
+    const dObj = parseDateToSafeDateObj(data[i][colDate]);
+    if (!dObj || dObj < scanStartDate) continue;
+    
+    const dateStr = toYYYYMMDD(dObj);
+    const cId = colClinicId !== -1 ? String(data[i][colClinicId]).trim() : "";
+    const rawName = colClinicName !== -1 ? String(data[i][colClinicName]) : "";
+    const normName = normalizeFunc(rawName);
+    
+    let startMin = NaN, endMin = NaN;
+    if (colStart !== -1 && colEnd !== -1) {
+      startMin = parseTimeToMinutes(data[i][colStart]);
+      endMin = parseTimeToMinutes(data[i][colEnd]);
+    }
+
+    const addRecord = (key) => {
+      if (!requestsMap.has(key)) requestsMap.set(key, []);
+      requestsMap.get(key).push({ startMin, endMin });
+    };
+
+    // IDと名前の両方でキーを作成（ダブルマッチング）
+    if (cId) addRecord(`${dateStr}_ID_${cId}`);
+    if (normName) addRecord(`${dateStr}_NAME_${normName}`);
+  }
+  
+  return requestsMap;
+}
+
 function getJinjerPaidLeaveData() {
   const JINJER_SS_ID = '1NfSmzERA-ee-8ToDYSwL_PYkxvMSxRv5Y_CehfeAQcQ';
   const leavesMap = new Map();
@@ -206,7 +328,6 @@ function getJinjerPaidLeaveData() {
   const data = sheet.getDataRange().getDisplayValues();
   if (data.length < 2) return leavesMap;
   
-  // 動的にヘッダー行を特定（行1〜5をスキャン）
   let headerRowIdx = 0;
   for (let i = 0; i < Math.min(5, data.length); i++) {
     const rowStr = data[i].join('');
@@ -216,7 +337,7 @@ function getJinjerPaidLeaveData() {
     }
   }
   
-  const headers = data[headerRowIdx].map(h => String(h).replace(/\s+/g, ''));
+  const headers = data[headerRowIdx].map(h => String(h).replace(/[\s ]+/g, ''));
   const colDate = headers.findIndex(h => h.includes('対象日'));
   const colName = headers.findIndex(h => h.includes('医師名'));
   const colStart = headers.findIndex(h => h.includes('開始'));
@@ -227,20 +348,20 @@ function getJinjerPaidLeaveData() {
   
   for (let i = headerRowIdx + 1; i < data.length; i++) {
     const status = String(data[i][colStatus]).trim();
-    if (status !== "済") continue; // 「済」のみ突合対象
+    if (status !== "済") continue; 
     
     const dObj = parseDateToSafeDateObj(data[i][colDate]);
     if (!dObj) continue;
     
     const dateStr = toYYYYMMDD(dObj);
-    const doctor = String(data[i][colName]).replace(/\s+/g, '');
+    const doctor = String(data[i][colName]).replace(/[\s ]+/g, '');
     if (!doctor) continue;
     
     const key = `${dateStr}_${doctor}`;
     leavesMap.set(key, {
       start: colStart !== -1 ? data[i][colStart] : "",
       end: colEnd !== -1 ? data[i][colEnd] : "",
-      found: false // 監査ループ内で有休シフトと紐づいたか判定用
+      found: false 
     });
   }
   
