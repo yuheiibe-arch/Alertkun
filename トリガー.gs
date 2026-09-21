@@ -3,6 +3,7 @@
  * アラートリストの転記（アーカイブ）処理
  * ※ A列にチェックを入れるとアーカイブシートへ自動移動します
  * ★UPDATE: 連続クリックによる衝突を防ぐ「ロック機能（排他制御）」を追加
+ * ★UPDATE: 削除時にシートがヘッダーのみになるエラーを防ぐ空行補完処理を追加
  * ==========================================
  */
 function processAlertArchiveTrigger(e) {
@@ -56,6 +57,11 @@ function processAlertArchiveTrigger(e) {
         
         // アラートリストから元の行を削除
         sheet.deleteRow(r);
+
+        // ★追加: 削除した結果、シートが1行(ヘッダーのみ)になった場合は空行を追加する
+        if (sheet.getMaxRows() < 2) {
+          sheet.insertRowsAfter(1, 1);
+        }
       }
     }
   } catch (error) {

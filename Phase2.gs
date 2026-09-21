@@ -2,6 +2,7 @@
  * ==========================================
  * シフトチェッカー Phase 2: 定期・常勤漏れ＆有給漏れ検知
  * ★UPDATE: 定期非常勤も休館日の場合は「欠勤シフト」を必須とするルールに変更（免除撤回）
+ * ★UPDATE: Jinjer有給未反映エラーに2日連続検知（タイムラグ猶予）を導入
  * ==========================================
  */
 function runShiftCheckerPhase2() {
@@ -49,6 +50,35 @@ function runShiftCheckerPhase2() {
       errorBackgrounds.push([null, null, null, null, null, doctor===""?"#eeeeee":null, empType===""?"#eeeeee":null, workTime===""?"#eeeeee":null, null, null, null, null]);
     }
   };
+
+  // ▼▼▼ ここから追加（Jinjerタイムラグ対応） ▼▼▼
+  const SYSTEM_SHEET_NAME_P2 = "SystemData_Phase2Lag";
+  let systemSheetP2 = ACTIVE_SS.getSheetByName(SYSTEM_SHEET_NAME_P2);
+  if (!systemSheetP2) {
+    systemSheetP2 = ACTIVE_SS.insertSheet(SYSTEM_SHEET_NAME_P2);
+    systemSheetP2.hideSheet();
+  }
+  let previousDelayDataP2 = {};
+  const sysValP2 = systemSheetP2.getRange(1, 1).getValue();
+  if (sysValP2) {
+    try { previousDelayDataP2 = JSON.parse(sysValP2); } catch(e) {}
+  }
+  const currentDelayDataP2 = {};
+  const todayYYYYMMDD = Utilities.formatDate(today, scriptTimeZone, "yyyy/MM/dd");
+
+  const processLagError = (type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, actionMsg, uniqueId) => {
+    const firstDetectedDate = previousDelayDataP2[uniqueId];
+    if (!firstDetectedDate) {
+      currentDelayDataP2[uniqueId] = todayYYYYMMDD; // 初回検知時は記録のみ
+    } else {
+      currentDelayDataP2[uniqueId] = firstDetectedDate; // 過去の記録を引き継ぎ
+      if (firstDetectedDate !== todayYYYYMMDD) {
+        // 2日連続検知なら実際にエラー出力
+        addError(type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, actionMsg, uniqueId);
+      }
+    }
+  };
+  // ▲▲▲ 追加ここまで ▲▲▲
 
   const locMaster = getCheckerLocationMaster(locSs);
   // 休館日マスタは pasteSs から取得
@@ -125,7 +155,8 @@ function runShiftCheckerPhase2() {
         const actionMsg = `有給申請に済となっていますが、確定シフトに有給シフトがありません（または通常勤務になっています）。確認してください。\n詳細はこちら:\n${targetUrl}`;
         const errorDetail = `正：${sTime}-${eTime}\n実：無し`;
 
-        addError("Jinjer有給未反映", displayDate, "有給申請", "", rawDocName, "", `${sTime}-${eTime}`, errorDetail, actionMsg, `有給漏れ_${dateStr}_${docClean}`);
+        // ★ 変更：addError を processLagError に変更する（Jinjerエラーのみタイムラグ対象）
+        processLagError("Jinjer有給未反映", displayDate, "有給申請", "", rawDocName, "", `${sTime}-${eTime}`, errorDetail, actionMsg, `有給漏れ_${dateStr}_${docClean}`);
       }
     }
   }
@@ -261,6 +292,9 @@ function runShiftCheckerPhase2() {
       }
     }
   });
+
+  // ★ 追加：遅延検知データをシステムシートに保存
+  systemSheetP2.getRange(1, 1).setValue(JSON.stringify(currentDelayDataP2));
 
   const alertSheet = setupSheet(ACTIVE_SS, "アラートリスト", ALERT_HEADERS);
 

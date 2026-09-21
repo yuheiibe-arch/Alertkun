@@ -2,6 +2,7 @@
  * ==========================================
  * シフトチェッカー Phase 3 & 依頼手当監査
  * ★UPDATE: 過去の募集シフトの時給監査を除外 ＆ アーカイブシートからの除外リスト読み込みを修正
+ * ★UPDATE: Jinjer有給未反映エラーに2日連続検知（タイムラグ猶予）を導入
  * ==========================================
  */
 function runShiftCheckerPhase3() {
@@ -60,6 +61,34 @@ function runShiftCheckerPhase3() {
       existingIds.add(uniqueId);
     }
   };
+
+  // ▼▼▼ ここから追加（Jinjerタイムラグ対応） ▼▼▼
+  const SYSTEM_SHEET_NAME_P3 = "SystemData_Phase3Lag";
+  let systemSheetP3 = ACTIVE_SS.getSheetByName(SYSTEM_SHEET_NAME_P3);
+  if (!systemSheetP3) {
+    systemSheetP3 = ACTIVE_SS.insertSheet(SYSTEM_SHEET_NAME_P3);
+    systemSheetP3.hideSheet();
+  }
+  let previousDelayDataP3 = {};
+  const sysValP3 = systemSheetP3.getRange(1, 1).getValue();
+  if (sysValP3) {
+    try { previousDelayDataP3 = JSON.parse(sysValP3); } catch(e) {}
+  }
+  const currentDelayDataP3 = {};
+  const todayYYYYMMDD = Utilities.formatDate(today, Session.getScriptTimeZone(), "yyyy/MM/dd");
+
+  const processLagError = (type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, uniqueId) => {
+    const firstDetectedDate = previousDelayDataP3[uniqueId];
+    if (!firstDetectedDate) {
+      currentDelayDataP3[uniqueId] = todayYYYYMMDD;
+    } else {
+      currentDelayDataP3[uniqueId] = firstDetectedDate;
+      if (firstDetectedDate !== todayYYYYMMDD) {
+        addError(type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, uniqueId);
+      }
+    }
+  };
+  // ▲▲▲ 追加ここまで ▲▲▲
 
   const jinjerLeavesMap = getJinjerPaidLeaveData();
   const locMaster = getCheckerLocationMaster(locSs);
@@ -250,7 +279,8 @@ function runShiftCheckerPhase3() {
         if (isYuku) {
           jinjerLeavesMap.get(jinjerKey).found = true; 
         } else if (shift.sourceSheet !== "募集" && shift.sourceSheet !== "応募") {
-          addError(`Jinjer有給未反映`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正：有休\n実：通常勤務(Jinjer済)`, `Jinjer未反映_${dateStr}_${shift.normClinic}_${docClean}`);
+          // ★変更: addError を processLagError に変更する
+          processLagError(`Jinjer有給未反映`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正：有休\n実：通常勤務(Jinjer済)`, `Jinjer未反映_${dateStr}_${shift.normClinic}_${docClean}`);
           jinjerLeavesMap.get(jinjerKey).found = true; 
         }
       }
@@ -313,10 +343,14 @@ function runShiftCheckerPhase3() {
       const dObj = new Date(dStr);
       if (dObj >= scanStartDate) {
         const dispD = `${dStr}(${jpDays[dObj.getDay()]})`;
-        addError(`Jinjer有給シフト未作成`, dispD, "不明", "不明", doc, "不明", `${leave.start}-${leave.end}`, `正：有給シフトあり\n実：シフト存在せず`, `Jinjer未登録_${dStr}_${doc}`);
+        // ★変更: addError を processLagError に変更する
+        processLagError(`Jinjer有給シフト未作成`, dispD, "不明", "不明", doc, "不明", `${leave.start}-${leave.end}`, `正：有給シフトあり\n実：シフト存在せず`, `Jinjer未登録_${dStr}_${doc}`);
       }
     }
   });
+
+  // ★ 追加：遅延検知データをシステムシートに保存
+  systemSheetP3.getRange(1, 1).setValue(JSON.stringify(currentDelayDataP3));
 
   if (errorValues.length > 0) {
     const combined = errorValues.map((val, i) => ({ val, bg: errorBackgrounds[i] }));
