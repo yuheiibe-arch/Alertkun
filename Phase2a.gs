@@ -1,6 +1,7 @@
 /**
  * ==========================================
  * シフトチェッカー Phase 2a: 募集枠・空き枠監査
+ * ★UPDATE: 亀有・北葛西の「内科」「小児科」独立計算（空き枠スルー問題の修正）
  * ★UPDATE: 2診目の未掲載エラー（金額入り未掲載含む）を完全撤廃 ＆ 同時間帯の別募集枠も重複として判定
  * ==========================================
  */
@@ -86,6 +87,7 @@ function runShiftCheckerPhase2_Recruit() {
 
   const rawActualShiftsMap = getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, locMaster.normalize);
 
+  // --- ★修正ポイント(1)：シフトをグループ化する際、亀有と北葛西は「科」もキーに含めて分離する ---
   const coverageMap = new Map();
   for (const [mapKey, actData] of rawActualShiftsMap.entries()) {
     const dateStr = mapKey.split('_')[0]; 
@@ -97,7 +99,15 @@ function runShiftCheckerPhase2_Recruit() {
       if (!shift.normClinic || isNaN(shift.startMin) || isNaN(shift.endMin)) return;
       if (EXCLUDED_CLINICS.includes(shift.rawClinic)) return;
       
-      const covKey = `${dateStr}_${shift.normClinic}`;
+      const isMultiDept = shift.normClinic.includes("亀有") || shift.normClinic.includes("北葛西");
+      let shiftDept = "";
+      if (isMultiDept) {
+         // 診療科カラムに内科とあれば内科、それ以外は小児科として扱う
+         shiftDept = shift.dept.includes("内科") ? "内科" : "小児科"; 
+      }
+      // 亀有・北葛西の場合は「日付_拠点名_科」をキーにする
+      const covKey = isMultiDept ? `${dateStr}_${shift.normClinic}_${shiftDept}` : `${dateStr}_${shift.normClinic}`;
+      
       if (!coverageMap.has(covKey)) coverageMap.set(covKey, []);
       coverageMap.get(covKey).push(shift);
     });
@@ -126,7 +136,11 @@ function runShiftCheckerPhase2_Recruit() {
 
   // --- 1. 未掲載エラー ＆ 1診目未掲載エラーの検知 ---
   coverageMap.forEach((shifts, covKey) => {
-    const [dateStr, normClinic] = covKey.split('_');
+    const parts = covKey.split('_');
+    const dateStr = parts[0];
+    const normClinic = parts[1];
+    const covDept = parts[2] || ""; // 亀有/北葛西の場合は「内科」か「小児科」が入る
+
     const dObj = new Date(dateStr);
     const msTime = dObj.getTime();
 
@@ -140,22 +154,22 @@ function runShiftCheckerPhase2_Recruit() {
 
     const displayDate = `${dateStr}(${jpDays[dObj.getDay()]})`;
     const recruitShifts = shifts.filter(s => s.sourceSheet === "募集");
+    
+    // アラートの拠点名に「亀有(小児科)」のように出力するためのラベル
+    const clinicLabel = covDept ? `${normClinic}(${covDept})` : normClinic;
 
     recruitShifts.forEach((rShift, index) => {
       const pStatus = rShift.publishStatus || "";
       const isUnpublished = pStatus.includes("未掲載") || pStatus.includes("非公開") || pStatus.includes("非掲載");
 
       if (isUnpublished) {
-        // ★修正: 確定シフトだけでなく、同時間帯にある「自分以外の全シフト（他の募集枠も含む）」を確認する
         const overlappingOthers = shifts.filter(s => 
           s !== rShift && s.startMin < rShift.endMin && s.endMin > rShift.startMin
         );
-
-        // 自分以外に同時間帯のシフトが1件も無ければ「1診目の未掲載」とみなす
         const isFirstDoc = (overlappingOthers.length === 0);
 
         if (isFirstDoc) {
-          const uniqueId = `1診目未掲載_${dateStr}_${normClinic}_${rShift.startStr}_${index}`;
+          const uniqueId = `1診目未掲載_${dateStr}_${clinicLabel}_${rShift.startStr}_${index}`;
           const firstDetectedDate = previousMissingData[uniqueId];
           
           if (!firstDetectedDate) {
@@ -164,11 +178,11 @@ function runShiftCheckerPhase2_Recruit() {
             currentMissingData[uniqueId] = firstDetectedDate;
             if (firstDetectedDate !== todayYYYYMMDD) { 
               const actionMsg = `規定の営業時間に対して必要なシフトが存在しません。\nシフトに空欄があります。確認・募集シフトを作成してください。`;
-              addError("募集忘れ(未掲載)", displayDate, rShift.rawClinic, rShift.dept, "未登録", "スポット", `${rShift.startStr}-${rShift.endStr}`, `1診目が未掲載`, actionMsg, uniqueId);
+              const dispDept = covDept ? covDept : rShift.dept;
+              addError("募集忘れ(未掲載)", displayDate, clinicLabel, dispDept, "未登録", "スポット", `${rShift.startStr}-${rShift.endStr}`, `1診目が未掲載`, actionMsg, uniqueId);
             }
           }
         }
-        // ★修正: 2診目の場合（isFirstDocがfalse）は、金額入りであっても完全にアラートを無視する（elseブロック撤廃）
       }
     });
   });
@@ -191,51 +205,59 @@ function runShiftCheckerPhase2_Recruit() {
       let closedInfo = closedDataMap.get(`${dateStr}_${normClinic}`) || closedDataMap.get(`${dateStr}_全拠点`);
       if (closedInfo && closedInfo.type === "closed") return;
 
-      const dayShifts = coverageMap.get(`${dateStr}_${normClinic}`) || [];
-      const isKitaKasai = normClinic.includes("北葛西");
-      
-      let requiredBlocks = [];
-      if (closedInfo && closedInfo.type === "irregular") {
-        requiredBlocks = closedInfo.ranges.map(r => ({
-          start: r.startMin, end: r.endMin,
-          startStr: formatMinutesToHHMM(r.startMin), endStr: formatMinutesToHHMM(r.endMin)
-        }));
-      } else {
-        requiredBlocks = [
-          { start: 9 * 60, end: 13 * 60, startStr: "09:00", endStr: "13:00" },
-          { start: 15 * 60, end: 18 * 60, startStr: "15:00", endStr: "18:00" },
-          { start: 18 * 60, end: isKitaKasai ? 20 * 60 : 21 * 60, startStr: "18:00", endStr: isKitaKasai ? "20:00" : "21:00" }
-        ];
-      }
+      // ★修正ポイント(2)：亀有と北葛西の場合は、内科用と小児科用の「2回」空き枠チェックを回す
+      const isMultiDept = normClinic.includes("亀有") || normClinic.includes("北葛西");
+      const deptsToCheck = isMultiDept ? ["内科", "小児科"] : [""];
 
-      const missingBlocks = [];
-
-      requiredBlocks.forEach(block => {
-        const coveringShifts = dayShifts.filter(s => s.startMin < block.end && s.endMin > block.start);
-        if (coveringShifts.length === 0) {
-          missingBlocks.push(`${block.startStr}-${block.endStr}`);
-        }
-      });
-
-      const dept = normClinic.includes("内科") ? "内科" : "小児科";
-
-      if (missingBlocks.length > 0) {
-        const timeStr = missingBlocks.join(", ");
-        const prefix = closedInfo && closedInfo.type === "irregular" ? "変則営業時間" : "規定の営業時間";
-        const actionMsg = `${prefix}に対して必要なシフトが存在しません。\nシフトに空欄があります。確認・募集シフトを作成してください。`;
-        const uniqueId = `募集忘れ_${dateStr}_${normClinic}_${timeStr}`;
-
-        const firstDetectedDate = previousMissingData[uniqueId];
+      deptsToCheck.forEach(targetDept => {
+        const covKey = isMultiDept ? `${dateStr}_${normClinic}_${targetDept}` : `${dateStr}_${normClinic}`;
+        const dayShifts = coverageMap.get(covKey) || [];
+        const isKitaKasai = normClinic.includes("北葛西");
         
-        if (!firstDetectedDate) {
-          currentMissingData[uniqueId] = todayYYYYMMDD;
+        let requiredBlocks = [];
+        if (closedInfo && closedInfo.type === "irregular") {
+          requiredBlocks = closedInfo.ranges.map(r => ({
+            start: r.startMin, end: r.endMin,
+            startStr: formatMinutesToHHMM(r.startMin), endStr: formatMinutesToHHMM(r.endMin)
+          }));
         } else {
-          currentMissingData[uniqueId] = firstDetectedDate;
-          if (firstDetectedDate !== todayYYYYMMDD) {
-            addError("募集忘れ", displayDate, normClinic, dept, "未登録", "", timeStr, `空き: ${timeStr}`, actionMsg, uniqueId);
+          requiredBlocks = [
+            { start: 9 * 60, end: 13 * 60, startStr: "09:00", endStr: "13:00" },
+            { start: 15 * 60, end: 18 * 60, startStr: "15:00", endStr: "18:00" },
+            { start: 18 * 60, end: isKitaKasai ? 20 * 60 : 21 * 60, startStr: "18:00", endStr: isKitaKasai ? "20:00" : "21:00" }
+          ];
+        }
+
+        const missingBlocks = [];
+        requiredBlocks.forEach(block => {
+          const coveringShifts = dayShifts.filter(s => s.startMin < block.end && s.endMin > block.start);
+          if (coveringShifts.length === 0) {
+            missingBlocks.push(`${block.startStr}-${block.endStr}`);
+          }
+        });
+
+        if (missingBlocks.length > 0) {
+          const timeStr = missingBlocks.join(", ");
+          const prefix = closedInfo && closedInfo.type === "irregular" ? "変則営業時間" : "規定の営業時間";
+          const actionMsg = `${prefix}に対して必要なシフトが存在しません。\nシフトに空欄があります。確認・募集シフトを作成してください。`;
+          
+          // 表示ラベル（例: 亀有(小児科)）
+          const displayDept = targetDept !== "" ? targetDept : (normClinic.includes("内科") ? "内科" : "小児科");
+          const clinicLabel = targetDept !== "" ? `${normClinic}(${targetDept})` : normClinic;
+          const uniqueId = `募集忘れ_${dateStr}_${clinicLabel}_${timeStr}`;
+
+          const firstDetectedDate = previousMissingData[uniqueId];
+          
+          if (!firstDetectedDate) {
+            currentMissingData[uniqueId] = todayYYYYMMDD;
+          } else {
+            currentMissingData[uniqueId] = firstDetectedDate;
+            if (firstDetectedDate !== todayYYYYMMDD) {
+              addError("募集忘れ", displayDate, clinicLabel, displayDept, "未登録", "", timeStr, `空き: ${timeStr}`, actionMsg, uniqueId);
+            }
           }
         }
-      }
+      });
     });
   }
 

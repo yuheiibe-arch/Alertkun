@@ -2,6 +2,7 @@
  * ==========================================
  * シフトチェッカー Phase 4: 採用くん連携監査
  * ★UPDATE: タイムラグ考慮の「2日連続検知」ルール導入（当日採用の猶予対応）
+ * ★UPDATE: 亀有・北葛西の「内科」「小児科」独立計算（Wブッキング等の誤検知防止）
  * ==========================================
  */
 function runShiftCheckerPhase4() {
@@ -164,7 +165,14 @@ function runShiftCheckerPhase4() {
   const clinicDateShifts = new Map();
   for (const actData of actualShiftsMap.values()) {
     actData.shifts.forEach(shift => {
-      const key = `${shift.dateStr}_${shift.normClinic}`;
+      // ★修正ポイント: 亀有・北葛西の場合は「科」を分離してグループ化
+      const isMultiDept = shift.normClinic.includes("亀有") || shift.normClinic.includes("北葛西");
+      let shiftDept = "";
+      if (isMultiDept) {
+        shiftDept = shift.dept.includes("内科") ? "内科" : "小児科"; 
+      }
+      const key = isMultiDept ? `${shift.dateStr}_${shift.normClinic}_${shiftDept}` : `${shift.dateStr}_${shift.normClinic}`;
+      
       if (!clinicDateShifts.has(key)) clinicDateShifts.set(key, []);
       clinicDateShifts.get(key).push(shift);
     });
@@ -215,7 +223,7 @@ function runShiftCheckerPhase4() {
     // ★拠点名の照合ロジック
     let standardClinic = "";
     if (rawClinic) {
-      const cleanRaw = rawClinic.replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/[\s ]+/g, "");
+      const cleanRaw = rawClinic.replace(/[【】\(（]?(内科\vert{}小児科)[\)）]?/g, "").replace(/[\s ]+/g, "");
       const addrMatch = addressMap.find(m => {
         const cleanMaster = m.address.replace(/[\s ]+/g, "");
         return cleanMaster.includes(cleanRaw) || cleanRaw.includes(cleanMaster);
@@ -228,7 +236,18 @@ function runShiftCheckerPhase4() {
     }
     
     const normClinic = locMaster.normalize(standardClinic);
-    const dept = normClinic.includes("内科") ? "内科" : "小児科";
+    
+    // ★修正ポイント: 採用くん側の「拠点名」から科を正確に判定
+    const isMultiDept = normClinic.includes("亀有") || normClinic.includes("北葛西");
+    let dept = "";
+    if (isMultiDept) {
+      // 採用くんの表記（rawClinic）に内科が含まれていれば内科、それ以外は小児科
+      dept = rawClinic.includes("内科") ? "内科" : "小児科";
+    } else {
+      dept = normClinic.includes("内科") ? "内科" : "小児科";
+    }
+    // 出力用ラベル（例: 亀有(小児科)）
+    const clinicLabel = isMultiDept ? `${normClinic}(${dept})` : normClinic;
 
     const timeStr = String(row[rCols['該当時間']]).trim();
     const timeParts = timeStr.split(/[〜～-]/);
@@ -243,7 +262,10 @@ function runShiftCheckerPhase4() {
     // ① 反映漏れ（シフト未登録）チェック
     let isReflected = false;
     
-    const dayClinicShifts = clinicDateShifts.get(`${dateStr}_${normClinic}`) || [];
+    // ★修正ポイント: 対象の科に絞ってシフトを取得
+    const covKey = isMultiDept ? `${dateStr}_${normClinic}_${dept}` : `${dateStr}_${normClinic}`;
+    const dayClinicShifts = clinicDateShifts.get(covKey) || [];
+    
     const hasConfirmed = dayClinicShifts.some(s => 
       (s.sourceSheet === "確定" || s.sourceSheet === "実績") && s.doctorName === docClean
     );
@@ -263,10 +285,9 @@ function runShiftCheckerPhase4() {
     if (!isReflected) {
       const targetUrl = `https://docs.google.com/spreadsheets/d/${RECRUIT_MASTER_ID}/edit#gid=${sheetId}&range=${i+1}:${i+1}`;
       const actionMsg = `採用くんで採用となっていますが、確定シフトに登録がありません。\n確認してください。\n応募取り下げの場合は、採用可否のステータスを不採用にしてください。\n\n詳細(採用くん): ${targetUrl}`;
-      const uniqueId = `採用漏れ_${dateStr}_${normClinic}_${docClean}_${i}`;
+      const uniqueId = `採用漏れ_${dateStr}_${normClinic}_${docClean}_${i}`; // ※既存アーカイブとの整合性のためID構造は維持
       
-      // ★ addError ではなく processLagError (2日連続チェック) を通す
-      processLagError("採用枠 未反映", displayDate, normClinic, dept, doctor, "スポット", `${sStr}-${eStr}`, "シフト未作成", actionMsg, uniqueId, targetUrl);
+      processLagError("採用枠 未反映", displayDate, clinicLabel, dept, doctor, "スポット", `${sStr}-${eStr}`, "シフト未作成", actionMsg, uniqueId, targetUrl);
       continue; 
     }
 
@@ -283,7 +304,7 @@ function runShiftCheckerPhase4() {
         const actionMsg = `採用くんの決定枠ですが、シフト上で別の医師（${otherNames}先生）がアサインされています。\n許容される２診であればA列にチェックを。ミスの場合は対応をお願いします。`;
         const uniqueId = `紹介重複_${dateStr}_${normClinic}_${docClean}_${i}`;
         
-        processLagError("紹介枠 Wブッキング", displayDate, normClinic, dept, doctor, "スポット", `${sStr}-${eStr}`, `重複: ${otherNames}`, actionMsg, uniqueId);
+        processLagError("紹介枠 Wブッキング", displayDate, clinicLabel, dept, doctor, "スポット", `${sStr}-${eStr}`, `重複: ${otherNames}`, actionMsg, uniqueId);
       }
     }
 
@@ -298,7 +319,7 @@ function runShiftCheckerPhase4() {
         const actionMsg = `採用くんで決定済みですが、同時間帯の募集枠が残っています。他媒体からの重複応募を防ぐため、該当の募集枠を取り下げ（クローズ）してください。`;
         const uniqueId = `募集残存_${dateStr}_${normClinic}_${docClean}_${i}`;
         
-        processLagError("募集枠 消し忘れ", displayDate, normClinic, dept, doctor, "スポット", `${sStr}-${eStr}`, "募集枠が残存", actionMsg, uniqueId);
+        processLagError("募集枠 消し忘れ", displayDate, clinicLabel, dept, doctor, "スポット", `${sStr}-${eStr}`, "募集枠が残存", actionMsg, uniqueId);
       }
     }
   }
