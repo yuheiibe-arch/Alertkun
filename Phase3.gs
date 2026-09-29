@@ -1,8 +1,10 @@
 /**
  * ==========================================
  * シフトチェッカー Phase 3: 時給・有休監査
- * ★UPDATE: マスタ規定と実際の入力値との時給不一致検知ロジック
- * ★UPDATE: 特別時給設定の読み取りと厳格判定
+ * ★UPDATE: 過去の募集シフトの時給監査を除外 ＆ アーカイブシートからの除外リスト読み込みを修正
+ * ★UPDATE: Jinjer有給未反映エラーに2日連続検知（タイムラグ猶予）を導入
+ * ★UPDATE: 過去年度の保存シートを無視し、対象年度(最新)のシートのみを読み込むよう修正
+ * ★UPDATE: 募集シフトの「特別時給設定」を判定し、1円でも高ければ厳格にエラーを出す仕様に変更
  * ==========================================
  */
 function runShiftCheckerPhase3() {
@@ -234,7 +236,9 @@ function runShiftCheckerPhase3() {
           
           if (is2ndDoc) {
             const maxWageCheck = Math.max(...shift.wages);
-            if (maxWageCheck === 0 && shift.wageTotal === 0) return; 
+            if (maxWageCheck === 0 && shift.wageTotal === 0) {
+              return; 
+            }
           }
         }
       }

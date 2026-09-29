@@ -44,7 +44,6 @@ function getCheckerLocationMaster(locSs) {
   };
 }
 
-// ★第1引数を pasteSs (貼付用マスタ) として受け取るように変更
 function getCheckerClosedDays(pasteSs, scanStartDate, normalizeFunc) {
   const closedDataMap = new Map();
 
@@ -128,7 +127,7 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
     const data = sheet.getDataRange().getDisplayValues();
     if (data.length < 2) return;
     
-    // ★ 取得対象に「特別時給設定」を追加
+    // ★ 取得対象の列に '特別時給設定' を追加
     const cols = getColumnIndices(data[0], [
       '医籍番号', '名前', 'クリニックNo', 'クリニック名', '診療科', '勤務種別', '勤務日', 
       '勤務開始時間', '勤務終了時間', '時給1', '時給2', '時給3', '時給4', '時給合計', '合計日給', '掲載ステータス', '業務内容', '備考', '応募日',
@@ -203,7 +202,7 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
         ],
         wageTotal: totalCol !== -1 ? Number(row[totalCol]) || 0 : 0,
         publishStatus: cols['掲載ステータス'] !== -1 ? String(row[cols['掲載ステータス']]).trim() : "",
-        specialWageFlag: cols['特別時給設定'] !== -1 ? String(row[cols['特別時給設定']]).trim() : "", // ★新設カラム追加
+        specialWageFlag: cols['特別時給設定'] !== -1 ? String(row[cols['特別時給設定']]).trim() : "", // ★新設カラムを追加
         remarks: remarksCol !== -1 ? String(row[remarksCol]) : "",
         applyDateObj: applyDateObj,
         staffComments: staffComments 
