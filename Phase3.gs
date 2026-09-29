@@ -3,6 +3,8 @@
  * シフトチェッカー Phase 3 & 依頼手当監査
  * ★UPDATE: 過去の募集シフトの時給監査を除外 ＆ アーカイブシートからの除外リスト読み込みを修正
  * ★UPDATE: Jinjer有給未反映エラーに2日連続検知（タイムラグ猶予）を導入
+ * ★UPDATE: 過去年度の保存シートを無視し、対象年度(最新)のシートのみを読み込むよう修正
+ * ★UPDATE: 募集シフトの「特別時給設定」を判定し、1円でも高ければ厳格にエラーを出す仕様に変更
  * ==========================================
  */
 function runShiftCheckerPhase3() {
@@ -41,7 +43,6 @@ function runShiftCheckerPhase3() {
 
   const existingIds = new Set();
   
-  // ★修正2: 「アーカイブ」シートを読み込み、除外IDをセットに追加（抜け落ちていた処理）
   const archiveSheet = setupSheet(ACTIVE_SS, "アーカイブ", ALERT_HEADERS);
   const archiveData = archiveSheet.getDataRange().getValues();
   for (let i = 1; i < archiveData.length; i++) {
@@ -62,7 +63,6 @@ function runShiftCheckerPhase3() {
     }
   };
 
-  // ▼▼▼ ここから追加（Jinjerタイムラグ対応） ▼▼▼
   const SYSTEM_SHEET_NAME_P3 = "SystemData_Phase3Lag";
   let systemSheetP3 = ACTIVE_SS.getSheetByName(SYSTEM_SHEET_NAME_P3);
   if (!systemSheetP3) {
@@ -88,7 +88,6 @@ function runShiftCheckerPhase3() {
       }
     }
   };
-  // ▲▲▲ 追加ここまで ▲▲▲
 
   const jinjerLeavesMap = getJinjerPaidLeaveData();
   const locMaster = getCheckerLocationMaster(locSs);
@@ -107,6 +106,11 @@ function runShiftCheckerPhase3() {
   
   attSs.getSheets().forEach(sheet => {
     const sName = sheet.getName();
+    
+    const yearMatch = sName.match(/\d{4}/);
+    if (yearMatch && !targetNendos.includes(parseInt(yearMatch[0], 10))) {
+      return; 
+    }
     
     if (sName.includes("年度") && !sName.includes("勤怠")) {
       let eType = sName.includes("常勤") && !sName.includes("非常勤") ? "常勤" : (sName.includes("定期非常勤") ? "定期非常勤" : "");
@@ -151,9 +155,6 @@ function runShiftCheckerPhase3() {
     }
     
     if (sName.includes("勤怠")) {
-      const yearMatch = sName.match(/\d{4}/);
-      if (yearMatch && !targetNendos.includes(parseInt(yearMatch[0], 10))) return;
-
       let eType = sName.includes("常勤") && !sName.includes("非常勤") ? "常勤" : (sName.includes("定期非常勤") ? "定期非常勤" : "");
       if (!eType) return;
 
@@ -207,7 +208,6 @@ function runShiftCheckerPhase3() {
       const closedInfo = closedDataMap.get(`${dateStr}_${shift.normClinic}`) || closedDataMap.get(`${dateStr}_全拠点`);
       if (closedInfo && closedInfo.type === "closed") {
         if (shift.sourceSheet === "募集" || docClean === "募集") {
-          // 未来の休館日募集シフトの場合のみ警告
           if (shiftTimeMs >= today.getTime()) {
             const maxWage = Math.max(...shift.wages);
             const isWageEntered = maxWage > 0 || shift.wageTotal > 0;
@@ -220,7 +220,6 @@ function runShiftCheckerPhase3() {
         return; 
       }
 
-      // ★修正1: 過去の募集シフトは時給監査を完全にスキップ（過去の空枠エラー防止）
       if (shift.sourceSheet === "募集" || docClean === "募集") {
         if (shiftTimeMs < today.getTime()) {
           return;
@@ -279,7 +278,6 @@ function runShiftCheckerPhase3() {
         if (isYuku) {
           jinjerLeavesMap.get(jinjerKey).found = true; 
         } else if (shift.sourceSheet !== "募集" && shift.sourceSheet !== "応募") {
-          // ★変更: addError を processLagError に変更する
           processLagError(`Jinjer有給未反映`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正：有休\n実：通常勤務(Jinjer済)`, `Jinjer未反映_${dateStr}_${shift.normClinic}_${docClean}`);
           jinjerLeavesMap.get(jinjerKey).found = true; 
         }
@@ -287,13 +285,17 @@ function runShiftCheckerPhase3() {
 
       let allowedMax = 20000;
       let expectedTotalStr = "算出不可"; 
+      let expectedHourly = 0; 
+      let expectedTotal = 0;  
       
       if (empType !== "常勤") {
         try {
           const res = NewWageEngine.calculateDailyTotal(shift.clinicId, shift.normClinic, shift.dept, dateStr, shift.startStr, shift.endStr, specialText);
           if (res.status === "SUCCESS") {
+            expectedTotal = res.total;
             expectedTotalStr = `￥${Math.round(res.total).toLocaleString()}`;
             allowedMax = res.maxHourly + 2000;
+            expectedHourly = res.maxHourly;
           } else {
             expectedTotalStr = res.msg;
           }
@@ -329,6 +331,48 @@ function runShiftCheckerPhase3() {
         if (!isWageEntered) {
           addError(`${pfx}時給・日給未入力`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正：${expectedTotalStr}\n実：￥0`, `${shift.sourceSheet}_未入力_${dateStr}_${shift.normClinic}_${docClean}`);
         }
+        // ▼ 募集シフト限定の厳格な時給・日給不一致検知ロジック
+        else if (shift.sourceSheet === "募集" && expectedHourly > 0) {
+          const isUnpublished = shift.publishStatus && (shift.publishStatus.includes("未掲載") || shift.publishStatus.includes("非公開") || shift.publishStatus.includes("非掲載"));
+          const isIrregularTime = (shift.startMin % 60 !== 0 || shift.endMin % 60 !== 0);
+
+          if (!isUnpublished && !isIrregularTime) {
+            let actualHourly = maxWage > 0 ? maxWage : (shift.wageTotal > 0 && shift.wageTotal < 20000 ? shift.wageTotal : 0);
+            
+            // ★ 新設された「特別時給設定」の読み取りと判定
+            const rawSpecialFlag = shift.specialWageFlag || "";
+            const isSpecialWage = rawSpecialFlag.includes("特別時給設定あり") || rawSpecialFlag.includes("TRUE") || rawSpecialFlag.includes("true") || rawSpecialFlag.includes("あり") || rawSpecialFlag.includes("☑");
+
+            let isTooCheap = false;
+            let isTooExpensive = false;
+
+            // ① 安い場合（正規時給より安い、または正規日給より安い）
+            if ((actualHourly > 0 && actualHourly < expectedHourly) || (shift.wageTotal > 20000 && expectedTotal > 0 && shift.wageTotal < expectedTotal)) {
+              isTooCheap = true;
+            }
+            
+            // ② 高い場合（1円でも高い場合で、かつ特別設定がない場合はすべてエラー）
+            if (actualHourly > 0 && actualHourly > expectedHourly) {
+              if (!isSpecialWage) {
+                isTooExpensive = true;
+              }
+            }
+
+            if (isTooCheap || isTooExpensive) {
+              let errorTitle = isTooExpensive ? `${pfx}時給設定エラー(高額/特別設定なし)` : `${pfx}時給設定エラー(不一致/安い)`;
+              
+              let correctMsg = `正：時給￥${expectedHourly.toLocaleString()}`;
+              let actualMsg  = `実：時給￥${actualHourly > 0 ? actualHourly.toLocaleString() : maxWage.toLocaleString()}`;
+              
+              if (expectedTotal > 0 && shift.wageTotal > 0) {
+                correctMsg += ` (日給￥${expectedTotal.toLocaleString()})`;
+                actualMsg  += ` (日給￥${shift.wageTotal.toLocaleString()})`;
+              }
+
+              addError(errorTitle, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `${correctMsg}\n${actualMsg}`, `${shift.sourceSheet}_時給不一致_${dateStr}_${shift.normClinic}_${docClean}`);
+            }
+          }
+        }
       }
 
       if (maxWage > 20000 && maxWage > allowedMax) {
@@ -343,13 +387,11 @@ function runShiftCheckerPhase3() {
       const dObj = new Date(dStr);
       if (dObj >= scanStartDate) {
         const dispD = `${dStr}(${jpDays[dObj.getDay()]})`;
-        // ★変更: addError を processLagError に変更する
         processLagError(`Jinjer有給シフト未作成`, dispD, "不明", "不明", doc, "不明", `${leave.start}-${leave.end}`, `正：有給シフトあり\n実：シフト存在せず`, `Jinjer未登録_${dStr}_${doc}`);
       }
     }
   });
 
-  // ★ 追加：遅延検知データをシステムシートに保存
   systemSheetP3.getRange(1, 1).setValue(JSON.stringify(currentDelayDataP3));
 
   if (errorValues.length > 0) {

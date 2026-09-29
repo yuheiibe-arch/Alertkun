@@ -2,6 +2,7 @@
  * ==========================================
  * シフトチェッカー 共通ヘルパー関数群 
  * ★UPDATE: 休館日参照先の修正 ＆ スタッフコメント取得対応
+ * ★UPDATE: 募集シフトの「特別時給設定」列の読み取りに対応
  * ==========================================
  */
 
@@ -127,11 +128,11 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
     const data = sheet.getDataRange().getDisplayValues();
     if (data.length < 2) return;
     
-    // ★ スタッフコメントを取得対象に追加
+    // ★ 取得対象に「特別時給設定」を追加
     const cols = getColumnIndices(data[0], [
       '医籍番号', '名前', 'クリニックNo', 'クリニック名', '診療科', '勤務種別', '勤務日', 
       '勤務開始時間', '勤務終了時間', '時給1', '時給2', '時給3', '時給4', '時給合計', '合計日給', '掲載ステータス', '業務内容', '備考', '応募日',
-      'スタッフコメント1', 'スタッフコメント2', 'スタッフコメント3', 'スタッフコメント4', 'スタッフコメント5'
+      'スタッフコメント1', 'スタッフコメント2', 'スタッフコメント3', 'スタッフコメント4', 'スタッフコメント5', '特別時給設定'
     ]);
     
     const totalCol = cols['時給合計'] !== -1 ? cols['時給合計'] : cols['合計日給'];
@@ -182,7 +183,6 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
          applyDateObj = parseDateToSafeDateObj(row[applyCol]);
       }
 
-      // ★ スタッフコメントを結合して保存
       const staffComments = comCols.map(idx => String(row[idx]).trim()).filter(v => v !== "").join(" / ");
       
       record.shifts.push({
@@ -203,9 +203,10 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
         ],
         wageTotal: totalCol !== -1 ? Number(row[totalCol]) || 0 : 0,
         publishStatus: cols['掲載ステータス'] !== -1 ? String(row[cols['掲載ステータス']]).trim() : "",
+        specialWageFlag: cols['特別時給設定'] !== -1 ? String(row[cols['特別時給設定']]).trim() : "", // ★新設カラム追加
         remarks: remarksCol !== -1 ? String(row[remarksCol]) : "",
         applyDateObj: applyDateObj,
-        staffComments: staffComments // ★
+        staffComments: staffComments 
       });
     }
   };
@@ -409,7 +410,7 @@ const NewWageEngine = (function() {
           };
 
           if (cId) _wageDB[sName][`${cId}_${rawDept}`] = rateData;
-          const nLoc = rawLoc.replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "").trim();
+          const nLoc = rawLoc.replace(/[【】\(（]?(内科\vert{}小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "").trim();
           _wageDB[sName][`${nLoc}_${rawDept}`] = rateData;
         }
       });
@@ -457,7 +458,7 @@ const NewWageEngine = (function() {
 
     if (!targetDB) return { status: "ERROR", msg: "該当年度の時給シートなし" };
 
-    const nLoc = locName.replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "").trim();
+    const nLoc = locName.replace(/[【】\(（]?(内科\vert{}小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "").trim();
     let targetDept = deptName;
     if (nLoc === "亀有" || nLoc === "北葛西") {
       targetDept = (locName.includes("内科") || deptName.includes("内科")) ? "内科" : "小児科";
