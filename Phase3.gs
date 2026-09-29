@@ -5,6 +5,7 @@
  * ★UPDATE: Jinjer有給未反映エラーに2日連続検知（タイムラグ猶予）を導入
  * ★UPDATE: 過去年度の保存シートを無視し、対象年度(最新)のシートのみを読み込むよう修正
  * ★UPDATE: 募集シフトの「特別時給設定」を判定し、1円でも高ければ厳格にエラーを出す仕様に変更
+ * ★UPDATE: 診療科、または業務内容/備考に「ワクチン」が含まれる特殊シフトは時給エラーから除外
  * ==========================================
  */
 function runShiftCheckerPhase3() {
@@ -332,8 +333,11 @@ function runShiftCheckerPhase3() {
         else if (shift.sourceSheet === "募集" && expectedHourly > 0) {
           const isUnpublished = shift.publishStatus && (shift.publishStatus.includes("未掲載") || shift.publishStatus.includes("非公開") || shift.publishStatus.includes("非掲載"));
           const isIrregularTime = (shift.startMin % 60 !== 0 || shift.endMin % 60 !== 0);
+          
+          // ★ 修正: 診療科、または業務内容/備考に「ワクチン」が含まれていればチェックから除外
+          const isVaccineShift = shift.dept.includes("ワクチン") || shift.remarks.includes("ワクチン");
 
-          if (!isUnpublished && !isIrregularTime) {
+          if (!isUnpublished && !isIrregularTime && !isVaccineShift) {
             let actualHourly = maxWage > 0 ? maxWage : (shift.wageTotal > 0 && shift.wageTotal < 20000 ? shift.wageTotal : 0);
             
             const rawSpecialFlag = shift.specialWageFlag || "";
