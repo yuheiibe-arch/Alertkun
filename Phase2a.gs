@@ -3,6 +3,7 @@
  * シフトチェッカー Phase 2a: 募集枠・空き枠監査
  * ★UPDATE: 亀有・北葛西の「内科」「小児科」独立計算（空き枠スルー問題の修正）
  * ★UPDATE: 2診目の未掲載エラー（金額入り未掲載含む）を完全撤廃 ＆ 同時間帯の別募集枠も重複として判定
+ * ★UPDATE: 拠点名マスタの「開院日」より前の日程は募集忘れ・未掲載エラーから自動除外
  * ==========================================
  */
 function runShiftCheckerPhase2_Recruit() {
@@ -87,7 +88,7 @@ function runShiftCheckerPhase2_Recruit() {
 
   const rawActualShiftsMap = getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, locMaster.normalize);
 
-  // --- ★修正ポイント(1)：シフトをグループ化する際、亀有と北葛西は「科」もキーに含めて分離する ---
+  // --- シフトをグループ化する際、亀有と北葛西は「科」もキーに含めて分離する ---
   const coverageMap = new Map();
   for (const [mapKey, actData] of rawActualShiftsMap.entries()) {
     const dateStr = mapKey.split('_')[0]; 
@@ -102,10 +103,8 @@ function runShiftCheckerPhase2_Recruit() {
       const isMultiDept = shift.normClinic.includes("亀有") || shift.normClinic.includes("北葛西");
       let shiftDept = "";
       if (isMultiDept) {
-         // 診療科カラムに内科とあれば内科、それ以外は小児科として扱う
-         shiftDept = shift.dept.includes("内科") ? "内科" : "小児科"; 
+        shiftDept = shift.dept.includes("内科") ? "内科" : "小児科"; 
       }
-      // 亀有・北葛西の場合は「日付_拠点名_科」をキーにする
       const covKey = isMultiDept ? `${dateStr}_${shift.normClinic}_${shiftDept}` : `${dateStr}_${shift.normClinic}`;
       
       if (!coverageMap.has(covKey)) coverageMap.set(covKey, []);
@@ -139,12 +138,16 @@ function runShiftCheckerPhase2_Recruit() {
     const parts = covKey.split('_');
     const dateStr = parts[0];
     const normClinic = parts[1];
-    const covDept = parts[2] || ""; // 亀有/北葛西の場合は「内科」か「小児科」が入る
+    const covDept = parts[2] || "";
 
-    const dObj = new Date(dateStr);
+    const dObj = parseDateToSafeDateObj(dateStr);
+    if (!dObj) return;
     const msTime = dObj.getTime();
 
     if (msTime < today.getTime()) return; 
+
+    // ★追加: 開院日より前の日程は未掲載エラーから除外
+    if (locMaster.isBeforeOpen(normClinic, dObj)) return;
 
     if (excludedSpecificClinics.has(normClinic)) return;
     if (holidaySkip.isActive && msTime >= holidaySkip.start && msTime <= holidaySkip.end) return;
@@ -155,7 +158,6 @@ function runShiftCheckerPhase2_Recruit() {
     const displayDate = `${dateStr}(${jpDays[dObj.getDay()]})`;
     const recruitShifts = shifts.filter(s => s.sourceSheet === "募集");
     
-    // アラートの拠点名に「亀有(小児科)」のように出力するためのラベル
     const clinicLabel = covDept ? `${normClinic}(${covDept})` : normClinic;
 
     recruitShifts.forEach((rShift, index) => {
@@ -202,10 +204,12 @@ function runShiftCheckerPhase2_Recruit() {
     activeClinics.forEach(normClinic => {
       if (excludedSpecificClinics.has(normClinic)) return;
 
+      // ★追加: 開院日より前の日程は募集忘れ（空き枠）検知から除外
+      if (locMaster.isBeforeOpen(normClinic, d)) return;
+
       let closedInfo = closedDataMap.get(`${dateStr}_${normClinic}`) || closedDataMap.get(`${dateStr}_全拠点`);
       if (closedInfo && closedInfo.type === "closed") return;
 
-      // ★修正ポイント(2)：亀有と北葛西の場合は、内科用と小児科用の「2回」空き枠チェックを回す
       const isMultiDept = normClinic.includes("亀有") || normClinic.includes("北葛西");
       const deptsToCheck = isMultiDept ? ["内科", "小児科"] : [""];
 
@@ -241,7 +245,6 @@ function runShiftCheckerPhase2_Recruit() {
           const prefix = closedInfo && closedInfo.type === "irregular" ? "変則営業時間" : "規定の営業時間";
           const actionMsg = `${prefix}に対して必要なシフトが存在しません。\nシフトに空欄があります。確認・募集シフトを作成してください。`;
           
-          // 表示ラベル（例: 亀有(小児科)）
           const displayDept = targetDept !== "" ? targetDept : (normClinic.includes("内科") ? "内科" : "小児科");
           const clinicLabel = targetDept !== "" ? `${normClinic}(${targetDept})` : normClinic;
           const uniqueId = `募集忘れ_${dateStr}_${clinicLabel}_${timeStr}`;

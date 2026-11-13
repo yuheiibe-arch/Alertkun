@@ -6,6 +6,7 @@
  * ★UPDATE: 過去年度の保存シートを無視し、対象年度(最新)のシートのみを読み込むよう修正
  * ★UPDATE: 募集シフトの「特別時給設定」を判定し、1円でも高ければ厳格にエラーを出す仕様に変更
  * ★UPDATE: 診療科、または業務内容/備考に「ワクチン」が含まれる特殊シフトは時給エラーから除外
+ * ★UPDATE: 年末年始（12/29〜1/3）のみ特別時給の上限を22,000円に引き上げ（超過時は上限時給超過エラー）
  * ==========================================
  */
 function runShiftCheckerPhase3() {
@@ -201,8 +202,9 @@ function runShiftCheckerPhase3() {
       const docClean = shift.doctorName || key.split('_')[1];
       const docId = shift.doctorId; 
       const dateStr = key.split('_')[0];
-      const displayDate = `${dateStr}(${jpDays[new Date(dateStr).getDay()]})`;
-      const shiftTimeMs = new Date(dateStr).getTime();
+      const shiftDateObj = new Date(dateStr);
+      const displayDate = `${dateStr}(${jpDays[shiftDateObj.getDay()]})`;
+      const shiftTimeMs = shiftDateObj.getTime();
 
       if (EXCLUDED_CLINICS.includes(shift.rawClinic) || EXCLUDED_DOCTORS.includes(docClean)) return;
       
@@ -282,7 +284,13 @@ function runShiftCheckerPhase3() {
         }
       }
 
-      let allowedMax = 20000;
+      // ★ 年末年始（12/29〜1/3）判定：該当期間のみ特別時給の上限を22,000円に引き上げ
+      const shiftMonth = shiftDateObj.getMonth() + 1;
+      const shiftDay = shiftDateObj.getDate();
+      const isNewYearPeriod = (shiftMonth === 12 && shiftDay >= 29) || (shiftMonth === 1 && shiftDay <= 3);
+      const baseUpperLimit = isNewYearPeriod ? 22000 : 20000;
+
+      let allowedMax = baseUpperLimit;
       let expectedTotalStr = "算出不可"; 
       let expectedHourly = 0; 
       let expectedTotal = 0;  
@@ -293,7 +301,7 @@ function runShiftCheckerPhase3() {
           if (res.status === "SUCCESS") {
             expectedTotal = res.total;
             expectedTotalStr = `￥${Math.round(res.total).toLocaleString()}`;
-            allowedMax = res.maxHourly + 2000;
+            allowedMax = Math.max(baseUpperLimit, res.maxHourly + 2000);
             expectedHourly = res.maxHourly;
           } else {
             expectedTotalStr = res.msg;
@@ -338,7 +346,7 @@ function runShiftCheckerPhase3() {
           const isVaccineShift = shift.dept.includes("ワクチン") || shift.remarks.includes("ワクチン");
 
           if (!isUnpublished && !isIrregularTime && !isVaccineShift) {
-            let actualHourly = maxWage > 0 ? maxWage : (shift.wageTotal > 0 && shift.wageTotal < 20000 ? shift.wageTotal : 0);
+            let actualHourly = maxWage > 0 ? maxWage : (shift.wageTotal > 0 && shift.wageTotal <= baseUpperLimit ? shift.wageTotal : 0);
             
             const rawSpecialFlag = shift.specialWageFlag || "";
             const isSpecialWage = rawSpecialFlag.includes("特別時給設定あり") || rawSpecialFlag.includes("TRUE") || rawSpecialFlag.includes("true") || rawSpecialFlag.includes("あり") || rawSpecialFlag.includes("☑");
@@ -346,7 +354,7 @@ function runShiftCheckerPhase3() {
             let isTooCheap = false;
             let isTooExpensive = false;
 
-            if ((actualHourly > 0 && actualHourly < expectedHourly) || (shift.wageTotal > 20000 && expectedTotal > 0 && shift.wageTotal < expectedTotal)) {
+            if ((actualHourly > 0 && actualHourly < expectedHourly) || (shift.wageTotal > baseUpperLimit && expectedTotal > 0 && shift.wageTotal < expectedTotal)) {
               isTooCheap = true;
             }
             
@@ -373,7 +381,7 @@ function runShiftCheckerPhase3() {
         }
       }
 
-      if (maxWage > 20000 && maxWage > allowedMax) {
+      if (maxWage > baseUpperLimit && maxWage > allowedMax) {
         addError(`${pfx}上限時給超過`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正(上限)：￥${allowedMax.toLocaleString()}\n実：￥${maxWage.toLocaleString()}`, `${shift.sourceSheet}_上限超過_${dateStr}_${shift.normClinic}_${docClean}`);
       }
     });

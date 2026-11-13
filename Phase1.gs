@@ -2,6 +2,7 @@
  * ==========================================
  * シフトチェッカー Phase 1: 休館日・反映漏れ・Wブッキング検知
  * ★UPDATE: 募集シフトを休館日アサインエラーから完全除外（「募集先生」エラーの防止）
+ * ★UPDATE: 開院日より前のシフト（事前研修等）はエラー対象から除外
  * ==========================================
  */
 function runShiftCheckerPhase1() {
@@ -92,6 +93,9 @@ function runShiftCheckerPhase1() {
 
       const docClean = doctor.replace(/\s+/g, '');
       const normClinic = locMaster.normalize(rawClinic);
+
+      // ★追加: 開院日より前の日程は休館日・Wブッキング監査から除外
+      if (locMaster.isBeforeOpen(normClinic, dateObj)) continue;
       
       const startStr = String(row[cols['勤務開始時間']]).trim();
       const endStr = String(row[cols['勤務終了時間']]).trim();
@@ -103,12 +107,11 @@ function runShiftCheckerPhase1() {
       unifiedShifts.push({ sourceSheet: sourceName, dateObj, dateStr, displayDate, clinic: rawClinic, normClinic, clinicId, dept, doctor: docClean, docId: docId, startStr, endStr, startMin, endMin });
 
       if (closedDataMap.has(`${dateStr}_${normClinic}`)) {
-        // ★修正: 「募集」シフトの場合は、Phase 1の「アサインエラー」から完全除外する（募集先生アラート防止）
         if (sourceName === "募集" || docClean === "募集") {
-           // 完全スルー（時給が入っているかどうかの監査は Phase 3 で行う）
+          // 完全スルー（時給が入っているかどうかの監査は Phase 3 で行う）
         } else {
-           const actionMsg = `休館日です。${docClean}先生がアサインされています。\n該当シフトを削除し、医師へ連絡をお願いします。\n対象：${docClean}先生（${startStr}-${endStr}）`;
-           addError("休館日アサイン", displayDate, rawClinic, dept, doctor, "", `${startStr}-${endStr}`, `休館日にアサインあり`, actionMsg, `休館_${dateStr}_${normClinic}_${docClean}_${i}`);
+          const actionMsg = `休館日です。${docClean}先生がアサインされています。\n該当シフトを削除し、医師へ連絡をお願いします。\n対象：${docClean}先生（${startStr}-${endStr}）`;
+          addError("休館日アサイン", displayDate, rawClinic, dept, doctor, "", `${startStr}-${endStr}`, `休館日にアサインあり`, actionMsg, `休館_${dateStr}_${normClinic}_${docClean}_${i}`);
         }
       }
     }

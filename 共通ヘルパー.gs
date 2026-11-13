@@ -3,6 +3,7 @@
  * シフトチェッカー 共通ヘルパー関数群 
  * ★UPDATE: 休館日参照先の修正 ＆ スタッフコメント取得対応
  * ★UPDATE: 募集シフトの「特別時給設定」列の読み取りに対応
+ * ★UPDATE: 拠点名マスタの「開院日」列を読み取り、開院前判定に対応
  * ==========================================
  */
 
@@ -11,6 +12,7 @@ const toYYYYMMDD = (d) => `${d.getFullYear()}/${String(d.getMonth() + 1).padStar
 function getCheckerLocationMaster(locSs) {
   const locMap = new Map();
   const locSystemStatus = new Map();
+  const locOpenDates = new Map(); // ★追加: 正規拠点名 -> 開院日(Dateオブジェクト 00:00:00)
   const locSheet = locSs.getSheetByName("拠点名");
   
   if (locSheet) {
@@ -18,6 +20,11 @@ function getCheckerLocationMaster(locSs) {
     const lHeaders = lData[0].map(h => String(h).replace(/[\s ]+/g, ''));
     const idxFormal = lHeaders.indexOf("正規記載");
     const idxStatus = lHeaders.indexOf("システム反映");
+    // ★追加: 「開院日」列を優先し、万が一の表記揺れ（開院・オープン日・開設日）にも対応
+    let idxOpenDate = lHeaders.indexOf("開院日");
+    if (idxOpenDate === -1) {
+      idxOpenDate = lHeaders.findIndex(h => h.includes("開院") || h.includes("オープン日") || h.includes("開設日"));
+    }
     const aliasIndices = lHeaders.map((h, i) => (h.includes("表記揺れ") || h.includes("クリニックNo")) ? i : -1).filter(i => i !== -1);
     
     if (idxFormal > -1) {
@@ -25,6 +32,14 @@ function getCheckerLocationMaster(locSs) {
         const formalName = String(lData[i][idxFormal]).replace(/[\s ]+/g, '');
         if (!formalName) continue;
         if (idxStatus > -1) locSystemStatus.set(formalName, String(lData[i][idxStatus]).trim() === "済");
+        
+        if (idxOpenDate > -1 && lData[i][idxOpenDate]) {
+          const openDateObj = parseDateToSafeDateObj(lData[i][idxOpenDate]);
+          if (openDateObj) {
+            openDateObj.setHours(0, 0, 0, 0);
+            locOpenDates.set(formalName, openDateObj);
+          }
+        }
         
         locMap.set(formalName, formalName);
         aliasIndices.forEach(idx => {
@@ -35,12 +50,27 @@ function getCheckerLocationMaster(locSs) {
     }
   }
 
+  const normalize = (rawName) => {
+    const clean = String(rawName).replace(/[\s 【】]+/g, "");
+    return locMap.has(clean) ? locMap.get(clean) : clean;
+  };
+
+  // ★追加: 指定した拠点・日付が開院日より前かどうかを判定するヘルパー
+  const isBeforeOpen = (clinicName, targetDate) => {
+    const norm = normalize(clinicName);
+    const openDate = locOpenDates.get(norm);
+    if (!openDate) return false;
+    const dObj = (targetDate instanceof Date) ? targetDate : parseDateToSafeDateObj(targetDate);
+    if (!dObj) return false;
+    const checkMs = new Date(dObj.getFullYear(), dObj.getMonth(), dObj.getDate()).getTime();
+    return checkMs < openDate.getTime();
+  };
+
   return {
     locSystemStatus,
-    normalize: (rawName) => {
-      const clean = String(rawName).replace(/[\s 【】]+/g, "");
-      return locMap.has(clean) ? locMap.get(clean) : clean;
-    }
+    locOpenDates,
+    normalize,
+    isBeforeOpen
   };
 }
 
@@ -127,7 +157,6 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
     const data = sheet.getDataRange().getDisplayValues();
     if (data.length < 2) return;
     
-    // ★ 取得対象の列に '特別時給設定' を追加
     const cols = getColumnIndices(data[0], [
       '医籍番号', '名前', 'クリニックNo', 'クリニック名', '診療科', '勤務種別', '勤務日', 
       '勤務開始時間', '勤務終了時間', '時給1', '時給2', '時給3', '時給4', '時給合計', '合計日給', '掲載ステータス', '業務内容', '備考', '応募日',
@@ -186,6 +215,8 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
       
       record.shifts.push({
         sourceSheet: sourceName,
+        dateStr: dateStr,
+        doctorName: doctor,
         doctorId: cols['医籍番号'] !== -1 ? String(row[cols['医籍番号']]).trim() : "",
         clinicId: cols['クリニックNo'] !== -1 ? String(row[cols['クリニックNo']]).trim() : "",
         rawClinic: rawClinic,
@@ -197,12 +228,14 @@ function getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, 
         startMin: parseTimeToMinutes(row[cols['勤務開始時間']]),
         endMin: parseTimeToMinutes(row[cols['勤務終了時間']]),
         wages: [
-          Number(row[cols['時給1']]) || 0, Number(row[cols['時給2']]) || 0,
-          Number(row[cols['時給3']]) || 0, Number(row[cols['時給4']]) || 0
+          Number(String(row[cols['時給1']] || '').replace(/[^\d.-]/g, '')) || 0,
+          Number(String(row[cols['時給2']] || '').replace(/[^\d.-]/g, '')) || 0,
+          Number(String(row[cols['時給3']] || '').replace(/[^\d.-]/g, '')) || 0,
+          Number(String(row[cols['時給4']] || '').replace(/[^\d.-]/g, '')) || 0
         ],
-        wageTotal: totalCol !== -1 ? Number(row[totalCol]) || 0 : 0,
+        wageTotal: totalCol !== -1 ? Number(String(row[totalCol] || '').replace(/[^\d.-]/g, '')) || 0 : 0,
         publishStatus: cols['掲載ステータス'] !== -1 ? String(row[cols['掲載ステータス']]).trim() : "",
-        specialWageFlag: cols['特別時給設定'] !== -1 ? String(row[cols['特別時給設定']]).trim() : "", // ★新設カラムを追加
+        specialWageFlag: cols['特別時給設定'] !== -1 ? String(row[cols['特別時給設定']]).trim() : "",
         remarks: remarksCol !== -1 ? String(row[remarksCol]) : "",
         applyDateObj: applyDateObj,
         staffComments: staffComments 
@@ -250,7 +283,7 @@ function formatMinutesToHHMM(mins) {
 function parseDateToSafeDateObj(dateInput) {
   if (!dateInput) return null;
   if (dateInput instanceof Date) return new Date(dateInput.getFullYear(), dateInput.getMonth(), dateInput.getDate());
-  const cleanStr = String(dateInput).replace(/\s*（.*?）/, '').replace(/[年月]/g, '/').replace(/日/g, '').replace(/-/g, '/').trim();
+  const cleanStr = String(dateInput).replace(/\s*[（(].*?[）)]/, '').replace(/[年月]/g, '/').replace(/日/g, '').replace(/-/g, '/').trim();
   const parts = cleanStr.split('/');
   return parts.length === 3 ? new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10)) : null;
 }
@@ -409,7 +442,7 @@ const NewWageEngine = (function() {
           };
 
           if (cId) _wageDB[sName][`${cId}_${rawDept}`] = rateData;
-          const nLoc = rawLoc.replace(/[【】\(（]?(内科\vert{}小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "").trim();
+          const nLoc = rawLoc.replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "").trim();
           _wageDB[sName][`${nLoc}_${rawDept}`] = rateData;
         }
       });
@@ -457,7 +490,7 @@ const NewWageEngine = (function() {
 
     if (!targetDB) return { status: "ERROR", msg: "該当年度の時給シートなし" };
 
-    const nLoc = locName.replace(/[【】\(（]?(内科\vert{}小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "").trim();
+    const nLoc = locName.replace(/[【】\(（]?(内科|小児科)[\)）]?/g, "").replace(/\/.*/, "").replace(/[\s ]+/g, "").trim();
     let targetDept = deptName;
     if (nLoc === "亀有" || nLoc === "北葛西") {
       targetDept = (locName.includes("内科") || deptName.includes("内科")) ? "内科" : "小児科";
