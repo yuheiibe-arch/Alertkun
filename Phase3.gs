@@ -6,7 +6,7 @@
  * ★UPDATE: 過去年度の保存シートを無視し、対象年度(最新)のシートのみを読み込むよう修正
  * ★UPDATE: 募集シフトの「特別時給設定」を判定し、1円でも高ければ厳格にエラーを出す仕様に変更
  * ★UPDATE: 診療科、または業務内容/備考に「ワクチン」が含まれる特殊シフトは時給エラーから除外
- * ★UPDATE: 年末年始（12/29〜1/3）のみ特別時給の上限を22,000円に引き上げ（超過時は上限時給超過エラー）
+ * ★UPDATE: 年末年始（12/29〜1/3）のみ特別時給として上限を22,000円に引き上げ（特別設定フラグ不問・22,000円超で高時給エラー）
  * ==========================================
  */
 function runShiftCheckerPhase3() {
@@ -202,7 +202,8 @@ function runShiftCheckerPhase3() {
       const docClean = shift.doctorName || key.split('_')[1];
       const docId = shift.doctorId; 
       const dateStr = key.split('_')[0];
-      const shiftDateObj = new Date(dateStr);
+      const shiftDateObj = parseDateToSafeDateObj(dateStr);
+      if (!shiftDateObj) return;
       const displayDate = `${dateStr}(${jpDays[shiftDateObj.getDay()]})`;
       const shiftTimeMs = shiftDateObj.getTime();
 
@@ -284,7 +285,7 @@ function runShiftCheckerPhase3() {
         }
       }
 
-      // ★ 年末年始（12/29〜1/3）判定：該当期間のみ特別時給の上限を22,000円に引き上げ
+      // ★ 年末年始（12/29〜1/3）判定：この期間のみ特別時給上限を22,000円に設定
       const shiftMonth = shiftDateObj.getMonth() + 1;
       const shiftDay = shiftDateObj.getDate();
       const isNewYearPeriod = (shiftMonth === 12 && shiftDay >= 29) || (shiftMonth === 1 && shiftDay <= 3);
@@ -301,7 +302,8 @@ function runShiftCheckerPhase3() {
           if (res.status === "SUCCESS") {
             expectedTotal = res.total;
             expectedTotalStr = `￥${Math.round(res.total).toLocaleString()}`;
-            allowedMax = Math.max(baseUpperLimit, res.maxHourly + 2000);
+            // 年末年始は22,000円を上限とし、通常期は従来通り maxHourly + 2000
+            allowedMax = isNewYearPeriod ? 22000 : (res.maxHourly + 2000);
             expectedHourly = res.maxHourly;
           } else {
             expectedTotalStr = res.msg;
@@ -341,8 +343,6 @@ function runShiftCheckerPhase3() {
         else if (shift.sourceSheet === "募集" && expectedHourly > 0) {
           const isUnpublished = shift.publishStatus && (shift.publishStatus.includes("未掲載") || shift.publishStatus.includes("非公開") || shift.publishStatus.includes("非掲載"));
           const isIrregularTime = (shift.startMin % 60 !== 0 || shift.endMin % 60 !== 0);
-          
-          // ★ 修正: 診療科、または業務内容/備考に「ワクチン」が含まれていればチェックから除外
           const isVaccineShift = shift.dept.includes("ワクチン") || shift.remarks.includes("ワクチン");
 
           if (!isUnpublished && !isIrregularTime && !isVaccineShift) {
@@ -358,7 +358,8 @@ function runShiftCheckerPhase3() {
               isTooCheap = true;
             }
             
-            if (actualHourly > 0 && actualHourly > expectedHourly) {
+            // ★年末年始(12/29〜1/3)は特別時給設定フラグが無くても22,000円以下なら許容（22,000円超は下の「上限時給超過」で検知）
+            if (!isNewYearPeriod && actualHourly > 0 && actualHourly > expectedHourly) {
               if (!isSpecialWage) {
                 isTooExpensive = true;
               }
@@ -381,8 +382,15 @@ function runShiftCheckerPhase3() {
         }
       }
 
-      if (maxWage > baseUpperLimit && maxWage > allowedMax) {
-        addError(`${pfx}上限時給超過`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正(上限)：￥${allowedMax.toLocaleString()}\n実：￥${maxWage.toLocaleString()}`, `${shift.sourceSheet}_上限超過_${dateStr}_${shift.normClinic}_${docClean}`);
+      // ★上限時給超過チェック（年末年始は22,000円超でエラー、通常期は20,000円超かつallowedMax超でエラー）
+      if (isNewYearPeriod) {
+        if (maxWage > 22000) {
+          addError(`${pfx}上限時給超過`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正(上限)：￥22,000\n実：￥${maxWage.toLocaleString()}`, `${shift.sourceSheet}_上限超過_${dateStr}_${shift.normClinic}_${docClean}`);
+        }
+      } else {
+        if (maxWage > 20000 && maxWage > allowedMax) {
+          addError(`${pfx}上限時給超過`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正(上限)：￥${allowedMax.toLocaleString()}\n実：￥${maxWage.toLocaleString()}`, `${shift.sourceSheet}_上限超過_${dateStr}_${shift.normClinic}_${docClean}`);
+        }
       }
     });
   }
@@ -390,8 +398,8 @@ function runShiftCheckerPhase3() {
   jinjerLeavesMap.forEach((leave, key) => {
     if (!leave.found) {
       const [dStr, doc] = key.split('_');
-      const dObj = new Date(dStr);
-      if (dObj >= scanStartDate) {
+      const dObj = parseDateToSafeDateObj(dStr);
+      if (dObj && dObj >= scanStartDate) {
         const dispD = `${dStr}(${jpDays[dObj.getDay()]})`;
         processLagError(`Jinjer有給シフト未作成`, dispD, "不明", "不明", doc, "不明", `${leave.start}-${leave.end}`, `正：有給シフトあり\n実：シフト存在せず`, `Jinjer未登録_${dStr}_${doc}`);
       }
