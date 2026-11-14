@@ -1,50 +1,56 @@
 /**
  * ==========================================
- * シフトチェッカー Phase 3: 時給・有休監査
+ * シフトチェッカー Phase 3: 時給・有休監査（高速キャッシュ・募集複数枠対応版）
  * ★UPDATE: 過去の募集シフトの時給監査を除外 ＆ アーカイブシートからの除外リスト読み込みを修正
- * ★UPDATE: Jinjer有給未反映エラーに2日連続検知（タイムラグ猶予）を導入
  * ★UPDATE: 過去年度の保存シートを無視し、対象年度(最新)のシートのみを読み込むよう修正
  * ★UPDATE: 募集シフトの「特別時給設定」を判定し、1円でも高ければ厳格にエラーを出す仕様に変更
  * ★UPDATE: 診療科、または業務内容/備考に「ワクチン」が含まれる特殊シフトは時給エラーから除外
  * ★UPDATE: 年末年始（12/29〜1/3）のみ特別時給として上限を22,000円に引き上げ（特別設定フラグ不問・22,000円超で高時給エラー）
+ * ★UPDATE: 募集シフトの同日複数コマで時給エラーが潰れないよう時間帯別ユニークキーに対応（旧アーカイブ互換維持）
+ * ★UPDATE: オンメモリキャッシュ共用による高速化 ＆ Phase2と重複していた死蔵Jinjer読込を整理
  * ==========================================
  */
 function runShiftCheckerPhase3() {
   const startTime = Date.now();
   Logger.log("=== Phase 3: 時給・給与監査 実行開始 ===");
 
-  const ACTIVE_SS = SpreadsheetApp.getActiveSpreadsheet(); 
-  const PASTE_MASTER_ID = '1cbeXWojsxNMhQUo1c6VflF5hLUJUyfuOXCFbGP5jJEA'; 
-  const SHIFT_MASTER_ID = '1LFVmqwJU-WQbNOuSai8k72bSK790Eq_lBZeNKmYu8co'; 
-  const LOC_MASTER_ID = '14RbsDcv0nXfEwweki8-9cK3lQUg1XUuhozLNF9u2qAs'; 
-  const ATTENDANCE_SS_ID = '1aEjphEv_63SeWQmwiOy9sx7IrMfawU01sHbKd_Ki4iA'; 
-  
+  const ACTIVE_SS = SpreadsheetApp.getActiveSpreadsheet();
+  const PASTE_MASTER_ID = '1cbeXWojsxNMhQUo1c6VflF5hLUJUyfuOXCFbGP5jJEA';
+  const SHIFT_MASTER_ID = '1LFVmqwJU-WQbNOuSai8k72bSK790Eq_lBZeNKmYu8co';
+  const LOC_MASTER_ID = '14RbsDcv0nXfEwweki8-9cK3lQUg1XUuhozLNF9u2qAs';
+  const ATTENDANCE_SS_ID = '1aEjphEv_63SeWQmwiOy9sx7IrMfawU01sHbKd_Ki4iA';
+
+  const openSs = (id) => (typeof getCachedSs === 'function') ? getCachedSs(id) : SpreadsheetApp.openById(id);
+  const readValues = (sh) => (typeof getCachedValues === 'function') ? getCachedValues(sh) : sh.getDataRange().getValues();
+  const readDisplayValues = (sh) => (typeof getCachedDisplayValues === 'function') ? getCachedDisplayValues(sh) : sh.getDataRange().getDisplayValues();
+
   let pasteSs, shiftSs, locSs, attSs;
   try {
-    pasteSs = SpreadsheetApp.openById(PASTE_MASTER_ID);
-    shiftSs = SpreadsheetApp.openById(SHIFT_MASTER_ID);
-    locSs = SpreadsheetApp.openById(LOC_MASTER_ID);
-    attSs = SpreadsheetApp.openById(ATTENDANCE_SS_ID);
+    pasteSs = openSs(PASTE_MASTER_ID);
+    shiftSs = openSs(SHIFT_MASTER_ID);
+    locSs = openSs(LOC_MASTER_ID);
+    attSs = openSs(ATTENDANCE_SS_ID);
   } catch (e) {
-    Logger.log("❌ マスタ読み込みエラー: " + e.message); return;
+    Logger.log("❌ マスタ読み込みエラー: " + e.message);
+    return;
   }
 
   const jpDays = ["日", "月", "火", "水", "木", "金", "土"];
   const errorValues = [], errorBackgrounds = [];
-  
+
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const scanStartDate = new Date(today.getTime());
   scanStartDate.setDate(scanStartDate.getDate() - 30);
-  
+
   const thresholdDate = new Date(today.getFullYear(), today.getMonth() + 2, 1);
   const ALERT_HEADERS = ["転記", "項目", "勤務日", "拠点名", "診療科", "医師名", "雇用区分", "勤務時間", "エラー箇所", "対応指示", "メモ", "ユニークキー"];
-  
+
   const EXCLUDED_CLINICS = ['院外勤務（小児科）', '嘱託医業務', '医師会業務', '【関東】バックアップシフト', '有給', '欠勤'];
   const EXCLUDED_DOCTORS = ['⚠休館※医師勤務なし', '休館※医師勤務なし', '⚠ 休館※医師勤務なし'];
 
   const existingIds = new Set();
-  
+
   const archiveSheet = setupSheet(ACTIVE_SS, "アーカイブ", ALERT_HEADERS);
   const archiveData = archiveSheet.getDataRange().getValues();
   for (let i = 1; i < archiveData.length; i++) {
@@ -57,72 +63,46 @@ function runShiftCheckerPhase3() {
     if (alertData[i][11]) existingIds.add(String(alertData[i][11]));
   }
 
-  const addError = (type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, uniqueId) => {
-    if (!existingIds.has(uniqueId)) {
-      errorValues.push([false, type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, "", "", uniqueId]);
-      errorBackgrounds.push([null, null, null, null, null, doctor===""?"#eeeeee":null, empType===""?"#eeeeee":null, workTime===""?"#eeeeee":null, null, null, null, null]);
-      existingIds.add(uniqueId);
-    }
+  const addError = (type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, uniqueId, legacyUid = null) => {
+    if (existingIds.has(uniqueId)) return;
+    if (legacyUid && existingIds.has(legacyUid)) return;
+
+    errorValues.push([false, type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, "", "", uniqueId]);
+    errorBackgrounds.push([null, null, null, null, null, doctor === "" ? "#eeeeee" : null, empType === "" ? "#eeeeee" : null, workTime === "" ? "#eeeeee" : null, null, null, null, null]);
+    existingIds.add(uniqueId);
   };
 
-  const SYSTEM_SHEET_NAME_P3 = "SystemData_Phase3Lag";
-  let systemSheetP3 = ACTIVE_SS.getSheetByName(SYSTEM_SHEET_NAME_P3);
-  if (!systemSheetP3) {
-    systemSheetP3 = ACTIVE_SS.insertSheet(SYSTEM_SHEET_NAME_P3);
-    systemSheetP3.hideSheet();
-  }
-  let previousDelayDataP3 = {};
-  const sysValP3 = systemSheetP3.getRange(1, 1).getValue();
-  if (sysValP3) {
-    try { previousDelayDataP3 = JSON.parse(sysValP3); } catch(e) {}
-  }
-  const currentDelayDataP3 = {};
-  const todayYYYYMMDD = Utilities.formatDate(today, Session.getScriptTimeZone(), "yyyy/MM/dd");
-
-  const processLagError = (type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, uniqueId) => {
-    const firstDetectedDate = previousDelayDataP3[uniqueId];
-    if (!firstDetectedDate) {
-      currentDelayDataP3[uniqueId] = todayYYYYMMDD;
-    } else {
-      currentDelayDataP3[uniqueId] = firstDetectedDate;
-      if (firstDetectedDate !== todayYYYYMMDD) {
-        addError(type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, uniqueId);
-      }
-    }
-  };
-
-  const jinjerLeavesMap = getJinjerPaidLeaveData();
   const locMaster = getCheckerLocationMaster(locSs);
   const closedDataMap = getCheckerClosedDays(pasteSs, scanStartDate, locMaster.normalize);
   const actualShiftsMap = getCheckerActualShifts(pasteSs, shiftSs, scanStartDate, thresholdDate, locMaster.normalize);
 
   const contractPeriods = new Map();
   const empTypeCache = new Map();
-  
+
   const getNendo = (d) => d.getMonth() < 3 ? d.getFullYear() - 1 : d.getFullYear();
   const maxForecastDate = new Date(today.getTime());
   maxForecastDate.setMonth(maxForecastDate.getMonth() + 9);
   const startNendo = getNendo(scanStartDate);
   const endNendo = getNendo(maxForecastDate);
   const targetNendos = Array.from(new Set([startNendo, endNendo]));
-  
+
   attSs.getSheets().forEach(sheet => {
     const sName = sheet.getName();
-    
+
     const yearMatch = sName.match(/\d{4}/);
     if (yearMatch && !targetNendos.includes(parseInt(yearMatch[0], 10))) {
-      return; 
+      return;
     }
-    
+
     if (sName.includes("年度") && !sName.includes("勤怠")) {
-      let eType = sName.includes("常勤") && !sName.includes("非常勤") ? "常勤" : (sName.includes("定期非常勤") ? "定期非常勤" : "");
+      const eType = sName.includes("常勤") && !sName.includes("非常勤") ? "常勤" : (sName.includes("定期非常勤") ? "定期非常勤" : "");
       if (!eType) return;
 
-      const data = sheet.getDataRange().getValues();
+      const data = readValues(sheet);
       if (data.length < 2) return;
       const headers = data[0].map(h => String(h).replace(/[\s ]+/g, ""));
       const cName = headers.indexOf("氏名") !== -1 ? headers.indexOf("氏名") : (headers.indexOf("名前") !== -1 ? headers.indexOf("名前") : headers.indexOf("医師名"));
-      const cId = headers.indexOf("医籍番号"); 
+      const cId = headers.indexOf("医籍番号");
       const cJoin = headers.findIndex(h => h.includes("入職") || h.includes("契約日"));
       const cLeave = headers.findIndex(h => h.includes("退職") || h.includes("終了"));
       const cSpecial = headers.indexOf("特別時給の内訳");
@@ -132,7 +112,7 @@ function runShiftCheckerPhase3() {
           const dName = String(data[r][cName]).replace(/\s+/g, '');
           const dId = cId !== -1 ? String(data[r][cId]).trim() : "";
           if (!dName && !dId) continue;
-          
+
           let jTime = 0, lTime = 4102444800000;
           if (cJoin !== -1 && data[r][cJoin]) {
             const d = parseDateToSafeDateObj(data[r][cJoin]);
@@ -143,7 +123,7 @@ function runShiftCheckerPhase3() {
             if (d) lTime = d.getTime();
           }
           const specialText = cSpecial !== -1 ? String(data[r][cSpecial]) : "";
-          
+
           if (dId) {
             if (!contractPeriods.has(`ID_${dId}`)) contractPeriods.set(`ID_${dId}`, []);
             contractPeriods.get(`ID_${dId}`).push({ type: eType, start: jTime, end: lTime, specialText: specialText });
@@ -155,18 +135,18 @@ function runShiftCheckerPhase3() {
         }
       }
     }
-    
+
     if (sName.includes("勤怠")) {
-      let eType = sName.includes("常勤") && !sName.includes("非常勤") ? "常勤" : (sName.includes("定期非常勤") ? "定期非常勤" : "");
+      const eType = sName.includes("常勤") && !sName.includes("非常勤") ? "常勤" : (sName.includes("定期非常勤") ? "定期非常勤" : "");
       if (!eType) return;
 
-      const data = sheet.getDataRange().getDisplayValues();
+      const data = readDisplayValues(sheet);
       if (data.length < 3) return;
       const docNames = [];
       const docIds = [];
       for (let c = 6; c < data[0].length; c++) {
         docNames[c] = String(data[0][c]).replace(/\s+/g, '');
-        docIds[c] = String(data[1][c]).trim(); 
+        docIds[c] = String(data[1][c]).trim();
       }
 
       for (let r = 2; r < data.length; r++) {
@@ -177,7 +157,7 @@ function runShiftCheckerPhase3() {
           const dName = docNames[c];
           const dId = docIds[c];
           if (!dName && !dId) continue;
-          
+
           const text = String(data[r][c]).trim();
           if (text !== "-") {
             if (dId) empTypeCache.set(`${dStr}_ID_${dId}`, eType);
@@ -200,7 +180,7 @@ function runShiftCheckerPhase3() {
   for (const [key, actData] of actualShiftsMap.entries()) {
     actData.shifts.forEach(shift => {
       const docClean = shift.doctorName || key.split('_')[1];
-      const docId = shift.doctorId; 
+      const docId = shift.doctorId;
       const dateStr = key.split('_')[0];
       const shiftDateObj = parseDateToSafeDateObj(dateStr);
       if (!shiftDateObj) return;
@@ -208,7 +188,7 @@ function runShiftCheckerPhase3() {
       const shiftTimeMs = shiftDateObj.getTime();
 
       if (EXCLUDED_CLINICS.includes(shift.rawClinic) || EXCLUDED_DOCTORS.includes(docClean)) return;
-      
+
       const closedInfo = closedDataMap.get(`${dateStr}_${shift.normClinic}`) || closedDataMap.get(`${dateStr}_全拠点`);
       if (closedInfo && closedInfo.type === "closed") {
         if (shift.sourceSheet === "募集" || docClean === "募集") {
@@ -221,7 +201,7 @@ function runShiftCheckerPhase3() {
             }
           }
         }
-        return; 
+        return;
       }
 
       if (shift.sourceSheet === "募集" || docClean === "募集") {
@@ -237,34 +217,35 @@ function runShiftCheckerPhase3() {
 
           const cShifts = clinicDateShifts.get(`${dateStr}_${shift.normClinic}`) || [];
           const is2ndDoc = cShifts.some(c => (c.sourceSheet === "確定" || c.sourceSheet === "実績" || c.sourceSheet === "応募") && c.startMin < shift.endMin && c.endMin > shift.startMin);
-          
+
           if (is2ndDoc) {
             const maxWageCheck = Math.max(...shift.wages);
             if (maxWageCheck === 0 && shift.wageTotal === 0) {
-              return; 
+              return;
             }
           }
         }
       }
 
       const pfx = (shift.sourceSheet === "募集" || shift.sourceSheet === "応募") ? `[${shift.sourceSheet}] ` : "";
+      const recruitTimeSuffix = shift.sourceSheet === "募集" ? `_${shift.startStr}` : "";
 
       let empType = null;
       let specialText = "";
-      
+
       let periods = docId ? contractPeriods.get(`ID_${docId}`) : null;
       if (!periods) periods = contractPeriods.get(`NAME_${docClean}`);
-      
+
       if (periods && periods.length > 0) {
         const validPeriod = periods.find(p => shiftTimeMs >= p.start && shiftTimeMs <= p.end);
         if (validPeriod) {
           empType = validPeriod.type;
           specialText = validPeriod.specialText;
         } else {
-          empType = "スポット"; 
+          empType = "スポット";
         }
       }
-      
+
       if (!empType || docClean === "募集") {
         empType = (docId ? empTypeCache.get(`${dateStr}_ID_${docId}`) : null) || empTypeCache.get(`${dateStr}_NAME_${docClean}`) || "スポット";
       }
@@ -275,16 +256,6 @@ function runShiftCheckerPhase3() {
       const actualWageStr = `￥${Math.max(maxWage, shift.wageTotal).toLocaleString()}`;
       const isWageEntered = maxWage > 0 || shift.wageTotal > 0;
 
-      const jinjerKey = `${dateStr}_${docClean}`;
-      if (jinjerLeavesMap.has(jinjerKey)) {
-        if (isYuku) {
-          jinjerLeavesMap.get(jinjerKey).found = true; 
-        } else if (shift.sourceSheet !== "募集" && shift.sourceSheet !== "応募") {
-          processLagError(`Jinjer有給未反映`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正：有休\n実：通常勤務(Jinjer済)`, `Jinjer未反映_${dateStr}_${shift.normClinic}_${docClean}`);
-          jinjerLeavesMap.get(jinjerKey).found = true; 
-        }
-      }
-
       // ★ 年末年始（12/29〜1/3）判定：この期間のみ特別時給上限を22,000円に設定
       const shiftMonth = shiftDateObj.getMonth() + 1;
       const shiftDay = shiftDateObj.getDate();
@@ -292,23 +263,22 @@ function runShiftCheckerPhase3() {
       const baseUpperLimit = isNewYearPeriod ? 22000 : 20000;
 
       let allowedMax = baseUpperLimit;
-      let expectedTotalStr = "算出不可"; 
-      let expectedHourly = 0; 
-      let expectedTotal = 0;  
-      
+      let expectedTotalStr = "算出不可";
+      let expectedHourly = 0;
+      let expectedTotal = 0;
+
       if (empType !== "常勤") {
         try {
           const res = NewWageEngine.calculateDailyTotal(shift.clinicId, shift.normClinic, shift.dept, dateStr, shift.startStr, shift.endStr, specialText);
           if (res.status === "SUCCESS") {
             expectedTotal = res.total;
             expectedTotalStr = `￥${Math.round(res.total).toLocaleString()}`;
-            // 年末年始は22,000円を上限とし、通常期は従来通り maxHourly + 2000
             allowedMax = isNewYearPeriod ? 22000 : (res.maxHourly + 2000);
             expectedHourly = res.maxHourly;
           } else {
             expectedTotalStr = res.msg;
           }
-        } catch(e) { 
+        } catch (e) {
           expectedTotalStr = `算出エラー`;
         }
       }
@@ -317,7 +287,7 @@ function runShiftCheckerPhase3() {
         if (isWageEntered) {
           addError(`${pfx}欠勤・時給消し忘れ`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正：￥0\n実：${actualWageStr}`, `${shift.sourceSheet}_時給消忘れ_${dateStr}_${shift.normClinic}_${docClean}`);
         }
-        return; 
+        return;
       }
 
       if (isYuku) {
@@ -328,7 +298,7 @@ function runShiftCheckerPhase3() {
             addError(`${pfx}有給時給・未入力`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正：${expectedTotalStr}\n実：￥0`, `${shift.sourceSheet}_有給未入力_${dateStr}_${shift.normClinic}_${docClean}`);
           }
         }
-        return; 
+        return;
       }
 
       if (empType === "常勤") {
@@ -338,16 +308,16 @@ function runShiftCheckerPhase3() {
         return;
       } else {
         if (!isWageEntered) {
-          addError(`${pfx}時給・日給未入力`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正：${expectedTotalStr}\n実：￥0`, `${shift.sourceSheet}_未入力_${dateStr}_${shift.normClinic}_${docClean}`);
-        }
-        else if (shift.sourceSheet === "募集" && expectedHourly > 0) {
+          const baseUid = `${shift.sourceSheet}_未入力_${dateStr}_${shift.normClinic}_${docClean}`;
+          addError(`${pfx}時給・日給未入力`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正：${expectedTotalStr}\n実：￥0`, `${baseUid}${recruitTimeSuffix}`, baseUid);
+        } else if (shift.sourceSheet === "募集" && expectedHourly > 0) {
           const isUnpublished = shift.publishStatus && (shift.publishStatus.includes("未掲載") || shift.publishStatus.includes("非公開") || shift.publishStatus.includes("非掲載"));
           const isIrregularTime = (shift.startMin % 60 !== 0 || shift.endMin % 60 !== 0);
           const isVaccineShift = shift.dept.includes("ワクチン") || shift.remarks.includes("ワクチン");
 
           if (!isUnpublished && !isIrregularTime && !isVaccineShift) {
-            let actualHourly = maxWage > 0 ? maxWage : (shift.wageTotal > 0 && shift.wageTotal <= baseUpperLimit ? shift.wageTotal : 0);
-            
+            const actualHourly = maxWage > 0 ? maxWage : (shift.wageTotal > 0 && shift.wageTotal <= baseUpperLimit ? shift.wageTotal : 0);
+
             const rawSpecialFlag = shift.specialWageFlag || "";
             const isSpecialWage = rawSpecialFlag.includes("特別時給設定あり") || rawSpecialFlag.includes("TRUE") || rawSpecialFlag.includes("true") || rawSpecialFlag.includes("あり") || rawSpecialFlag.includes("☑");
 
@@ -357,8 +327,8 @@ function runShiftCheckerPhase3() {
             if ((actualHourly > 0 && actualHourly < expectedHourly) || (shift.wageTotal > baseUpperLimit && expectedTotal > 0 && shift.wageTotal < expectedTotal)) {
               isTooCheap = true;
             }
-            
-            // ★年末年始(12/29〜1/3)は特別時給設定フラグが無くても22,000円以下なら許容（22,000円超は下の「上限時給超過」で検知）
+
+            // 年末年始(12/29〜1/3)は特別時給設定フラグが無くても22,000円以下なら許容（22,000円超は下の「上限時給超過」で検知）
             if (!isNewYearPeriod && actualHourly > 0 && actualHourly > expectedHourly) {
               if (!isSpecialWage) {
                 isTooExpensive = true;
@@ -366,17 +336,18 @@ function runShiftCheckerPhase3() {
             }
 
             if (isTooCheap || isTooExpensive) {
-              let errorTitle = isTooExpensive ? `${pfx}時給設定エラー(高額/特別設定なし)` : `${pfx}時給設定エラー(不一致/安い)`;
-              
+              const errorTitle = isTooExpensive ? `${pfx}時給設定エラー(高額/特別設定なし)` : `${pfx}時給設定エラー(不一致/安い)`;
+
               let correctMsg = `正：時給￥${expectedHourly.toLocaleString()}`;
-              let actualMsg  = `実：時給￥${actualHourly > 0 ? actualHourly.toLocaleString() : maxWage.toLocaleString()}`;
-              
+              let actualMsg = `実：時給￥${actualHourly > 0 ? actualHourly.toLocaleString() : maxWage.toLocaleString()}`;
+
               if (expectedTotal > 0 && shift.wageTotal > 0) {
                 correctMsg += ` (日給￥${expectedTotal.toLocaleString()})`;
-                actualMsg  += ` (日給￥${shift.wageTotal.toLocaleString()})`;
+                actualMsg += ` (日給￥${shift.wageTotal.toLocaleString()})`;
               }
 
-              addError(errorTitle, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `${correctMsg}\n${actualMsg}`, `${shift.sourceSheet}_時給不一致_${dateStr}_${shift.normClinic}_${docClean}`);
+              const baseUid = `${shift.sourceSheet}_時給不一致_${dateStr}_${shift.normClinic}_${docClean}`;
+              addError(errorTitle, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `${correctMsg}\n${actualMsg}`, `${baseUid}${recruitTimeSuffix}`, baseUid);
             }
           }
         }
@@ -385,45 +356,42 @@ function runShiftCheckerPhase3() {
       // ★上限時給超過チェック（年末年始は22,000円超でエラー、通常期は20,000円超かつallowedMax超でエラー）
       if (isNewYearPeriod) {
         if (maxWage > 22000) {
-          addError(`${pfx}上限時給超過`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正(上限)：￥22,000\n実：￥${maxWage.toLocaleString()}`, `${shift.sourceSheet}_上限超過_${dateStr}_${shift.normClinic}_${docClean}`);
+          const baseUid = `${shift.sourceSheet}_上限超過_${dateStr}_${shift.normClinic}_${docClean}`;
+          addError(`${pfx}上限時給超過`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正(上限)：￥22,000\n実：￥${maxWage.toLocaleString()}`, `${baseUid}${recruitTimeSuffix}`, baseUid);
         }
       } else {
         if (maxWage > 20000 && maxWage > allowedMax) {
-          addError(`${pfx}上限時給超過`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正(上限)：￥${allowedMax.toLocaleString()}\n実：￥${maxWage.toLocaleString()}`, `${shift.sourceSheet}_上限超過_${dateStr}_${shift.normClinic}_${docClean}`);
+          const baseUid = `${shift.sourceSheet}_上限超過_${dateStr}_${shift.normClinic}_${docClean}`;
+          addError(`${pfx}上限時給超過`, displayDate, shift.rawClinic, shift.dept, docClean, empType, `${shift.startStr}-${shift.endStr}`, `正(上限)：￥${allowedMax.toLocaleString()}\n実：￥${maxWage.toLocaleString()}`, `${baseUid}${recruitTimeSuffix}`, baseUid);
         }
       }
     });
   }
 
-  jinjerLeavesMap.forEach((leave, key) => {
-    if (!leave.found) {
-      const [dStr, doc] = key.split('_');
-      const dObj = parseDateToSafeDateObj(dStr);
-      if (dObj && dObj >= scanStartDate) {
-        const dispD = `${dStr}(${jpDays[dObj.getDay()]})`;
-        processLagError(`Jinjer有給シフト未作成`, dispD, "不明", "不明", doc, "不明", `${leave.start}-${leave.end}`, `正：有給シフトあり\n実：シフト存在せず`, `Jinjer未登録_${dStr}_${doc}`);
-      }
-    }
-  });
-
-  systemSheetP3.getRange(1, 1).setValue(JSON.stringify(currentDelayDataP3));
-
   if (errorValues.length > 0) {
     const combined = errorValues.map((val, i) => ({ val, bg: errorBackgrounds[i] }));
-    combined.sort((a, b) => a.val[2].localeCompare(b.val[2])); 
+    combined.sort((a, b) => a.val[2].localeCompare(b.val[2]));
     const sortedValues = combined.map(item => item.val);
     const sortedBackgrounds = combined.map(item => item.bg);
 
-    const startRow = alertSheet.getLastRow() + 1;
-    const requiredRows = startRow + sortedValues.length - 1;
-    if (alertSheet.getMaxRows() < requiredRows) {
-      alertSheet.insertRowsAfter(alertSheet.getMaxRows(), requiredRows - alertSheet.getMaxRows());
+    if (typeof appendAlertRowsSafe === 'function') {
+      appendAlertRowsSafe(alertSheet, ALERT_HEADERS.length, sortedValues, sortedBackgrounds);
+    } else {
+      const startRow = alertSheet.getLastRow() + 1;
+      const requiredRows = startRow + sortedValues.length - 1;
+      if (alertSheet.getMaxRows() < requiredRows) {
+        alertSheet.insertRowsAfter(alertSheet.getMaxRows(), requiredRows - alertSheet.getMaxRows());
+      }
+      alertSheet.getRange(startRow, 1, sortedValues.length, ALERT_HEADERS.length)
+        .setValues(sortedValues)
+        .setBackgrounds(sortedBackgrounds)
+        .setHorizontalAlignment("left");
+      alertSheet.getRange(startRow, 1, sortedValues.length, 1).insertCheckboxes();
     }
-
-    alertSheet.getRange(startRow, 1, sortedValues.length, ALERT_HEADERS.length).setValues(sortedValues).setBackgrounds(sortedBackgrounds).setHorizontalAlignment("left");
-    alertSheet.getRange(startRow, 1, sortedValues.length, 1).insertCheckboxes(); 
     Logger.log(`✅ ${sortedValues.length}件のエラー(時給・有休監査)を末尾に追記しました。`);
   } else {
     Logger.log("✅ 新規エラーはありませんでした。");
   }
+
+  Logger.log(`⏱ Phase 3 処理時間: ${(Date.now() - startTime) / 1000}秒`);
 }
