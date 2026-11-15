@@ -1,4 +1,3 @@
-
 /**
  * ============================================================================
  * 【Phase4-A_採用監査_基盤・拠点同定】
@@ -13,6 +12,9 @@ function runShiftCheckerPhase4() {
   Logger.log("=== Phase 4: 採用くん連携監査 実行開始 ===");
 
   const ACTIVE_SS = SpreadsheetApp.getActiveSpreadsheet();
+  // ドライラン（仮想シート）実行中かどうかを自動判定（ドライラン中は外部シートへの書き込みを行わない）
+  const isDryRun = (typeof ACTIVE_SS.getSheets !== 'function');
+
   const PASTE_MASTER_ID = '1cbeXWojsxNMhQUo1c6VflF5hLUJUyfuOXCFbGP5jJEA';
   const SHIFT_MASTER_ID = '1LFVmqwJU-WQbNOuSai8k72bSK790Eq_lBZeNKmYu8co';
   const LOC_MASTER_ID = '14RbsDcv0nXfEwweki8-9cK3lQUg1XUuhozLNF9u2qAs';
@@ -53,8 +55,11 @@ function runShiftCheckerPhase4() {
   const recruitPack = loadAndGroupPhase4Adoptions_(recruitSs, today, clinicEngine.identifyClinic);
   if (!recruitPack) return;
 
-  // 5. 2段階の厳格1対1引き当て（識別番号最優先 → 同日＋正規拠点＋診療科＋医師名） [Phase4-B]
-  const matchedShiftByGroup = matchPhase4AdoptionsToShifts_(recruitPack.groupedAdoptions, shiftPack.confirmedShifts);
+  // 5. 3段階の厳格引き当て（識別番号 → 同日同拠点 → 同日同時間帯の拠点移動・旧行判定） [Phase4-B]
+  const matchResult = matchPhase4AdoptionsToShifts_(recruitPack.groupedAdoptions, shiftPack.confirmedShifts);
+
+  // 5.5 拠点移動・求人取り直し旧行を「処理済み」シートへ自動記載 [Phase4-B]
+  applyPhase4RecruitSheetUpdates_(recruitPack, matchResult.sheetUpdates, isDryRun);
 
   // 6. 各採用案件の3種監査判定（①未反映 ／ ②紹介枠Wブッキング ／ ③募集枠消し忘れ） [Phase4-C]
   evaluatePhase4AdoptionAudits_({
@@ -62,7 +67,7 @@ function runShiftCheckerPhase4() {
     sheetId: recruitPack.sheetId,
     recruitMasterId: RECRUIT_MASTER_ID,
     today: today,
-    matchedShiftByGroup: matchedShiftByGroup,
+    matchedShiftByGroup: matchResult.matchedShiftByGroup,
     confirmedShifts: shiftPack.confirmedShifts,
     clinicDateShifts: shiftPack.clinicDateShifts,
     twoDocRequests: twoDocRequests,
@@ -73,10 +78,6 @@ function runShiftCheckerPhase4() {
   finalizePhase4Output_(state, ALERT_HEADERS.length, startTime);
 }
 
-/**
- * アーカイブ済みユニークキー（旧形式の行番号付きキー互換含む）と
- * タイムラグ（2日連続検知）用システムシートを初期化する内部ヘルパー
- */
 function initPhase4ArchiveAndLagState_(activeSs, alertHeaders, todayYYYYMMDD) {
   const errorValues = [];
   const errorBackgrounds = [];
@@ -160,8 +161,14 @@ function initPhase4ArchiveAndLagState_(activeSs, alertHeaders, todayYYYYMMDD) {
     return null;
   };
 
-  const processLagError = (type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, actionMsg, uniqueId, legacyPrefix, rowIndices, targetUrl = null) => {
+  const processLagError = (type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, actionMsg, uniqueId, legacyPrefix, rowIndices, targetUrl = null, forceImmediate = false) => {
     const firstDetectedDate = findPreviousDetectedDate(uniqueId, legacyPrefix, rowIndices);
+    if (forceImmediate) {
+      currentDelayData[uniqueId] = firstDetectedDate || "AGED";
+      addError(type, displayDate, clinic, dept, doctor, empType, workTime, errorDetail, actionMsg, uniqueId, legacyPrefix, rowIndices, targetUrl);
+      return;
+    }
+
     if (!firstDetectedDate) {
       currentDelayData[uniqueId] = todayYYYYMMDD;
     } else {
@@ -183,9 +190,6 @@ function initPhase4ArchiveAndLagState_(activeSs, alertHeaders, todayYYYYMMDD) {
   };
 }
 
-/**
- * 拠点マスタから「正規記載・表記揺れ・住所（漢数字/全角/ハイフン吸収）・部分施設名」を解決する同定エンジンを構築
- */
 function buildPhase4ClinicIdentifier_(locSs, excludedNonClinics) {
   const locData = getCachedDisplayValues(locSs.getSheetByName("拠点名"));
   const locHeaders = locData[0].map(h => String(h).replace(/[\s ]+/g, ''));

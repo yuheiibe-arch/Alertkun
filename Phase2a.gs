@@ -3,6 +3,7 @@
  * シフトチェッカー Phase 2a: 募集枠・空き枠監査
  * ★UPDATE: 亀有・北葛西の「内科」「小児科」独立計算
  * ★UPDATE: 2診目の未掲載エラー撤廃 ＆ 開院前日程の自動除外
+ * ★UPDATE: 「〇〇ワクチンバックアップシフト」等のバックアップ系枠を未掲載エラーから自動除外
  * ★UPDATE: キャッシュヘルパー共用化によりデータ読込を高速化
  * ==========================================
  */
@@ -40,6 +41,10 @@ function runShiftCheckerPhase2_Recruit() {
   const ALERT_HEADERS = ["転記", "項目", "勤務日", "拠点名", "診療科", "医師名", "雇用区分", "勤務時間", "エラー箇所", "対応指示", "メモ", "ユニークキー"];
 
   const EXCLUDED_CLINICS = ['院外勤務（小児科）', '嘱託医業務', '医師会業務', '【関東】バックアップシフト', '有給', '欠勤'];
+  const isExcludedNonClinic = (name) => {
+    const s = String(name || "").trim();
+    return EXCLUDED_CLINICS.includes(s) || s.includes("バックアップ");
+  };
 
   const existingIds = new Set();
   const archiveData = setupSheet(ACTIVE_SS, "アーカイブ", ALERT_HEADERS).getDataRange().getValues();
@@ -96,7 +101,7 @@ function runShiftCheckerPhase2_Recruit() {
 
     actData.shifts.forEach(shift => {
       if (!shift.normClinic || isNaN(shift.startMin) || isNaN(shift.endMin)) return;
-      if (EXCLUDED_CLINICS.includes(shift.rawClinic)) return;
+      if (isExcludedNonClinic(shift.rawClinic) || isExcludedNonClinic(shift.normClinic)) return;
 
       const isMultiDept = shift.normClinic.includes("亀有") || shift.normClinic.includes("北葛西");
       let shiftDept = "";
@@ -143,6 +148,7 @@ function runShiftCheckerPhase2_Recruit() {
     const msTime = dObj.getTime();
 
     if (msTime < today.getTime()) return;
+    if (isExcludedNonClinic(normClinic)) return;
     if (locMaster.isBeforeOpen(normClinic, dObj)) return;
     if (excludedSpecificClinics.has(normClinic)) return;
     if (holidaySkip.isActive && msTime >= holidaySkip.start && msTime <= holidaySkip.end) return;
@@ -185,7 +191,7 @@ function runShiftCheckerPhase2_Recruit() {
 
   // --- 2. 募集忘れ の検知（完全に空枠の場合） ---
   const activeClinics = Array.from(locMaster.locSystemStatus.entries())
-    .filter(([_, isActive]) => isActive)
+    .filter(([name, isActive]) => isActive && !isExcludedNonClinic(name))
     .map(([name, _]) => name);
 
   for (let d = new Date(today.getTime()); d <= scanEndDate; d.setDate(d.getDate() + 1)) {
